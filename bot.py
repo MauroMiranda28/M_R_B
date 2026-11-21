@@ -294,7 +294,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v2"
+    name = "survivor-v3"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -542,8 +542,22 @@ class Bot:
         act = {"tick": obs["tick"]}
 
         # ---------- events
+        evlog = []
         for ev in obs.get("events", []):
             et = ev.get("type")
+            try:
+                if et == "damaged":
+                    b = ev.get("bearing")
+                    evlog.append("DMG %.0f %s by%s%s%s" % (ev.get("amount", 0), ev.get("weapon"), ev.get("by"),
+                                                          " b%.2f" % b if b is not None else "",
+                                                          " REAR" if ev.get("rear") else ""))
+                elif et == "hit":
+                    evlog.append("HIT %s %.0f %s%s" % (ev.get("target"), ev.get("amount", 0), ev.get("weapon"),
+                                                      " " + ev["effect"] if ev.get("effect") else ""))
+                elif et in ("kill", "effect", "drop", "pickup", "upgrade", "took", "dropped", "take_failed"):
+                    evlog.append(et.upper() + " " + " ".join("%s=%s" % (k, v) for k, v in ev.items() if k != "type"))
+            except Exception:
+                pass
             if et == "damaged":
                 by = ev.get("by")
                 if by is not None and ev.get("weapon") != "zone":
@@ -702,7 +716,8 @@ class Bot:
                 (target["hpf"] < 0.25 and hpf > 0.35 and nthreat <= 1) or \
                 (light and d < 35 and my_power > their_power * 1.1 and nthreat <= 1)
             hide_xy = None
-            if not press and not zone_urgent:
+            want_hide = hpf < 0.5 or nthreat >= 2 or their_power > my_power * 1.25
+            if not press and want_hide and not zone_urgent:
                 eyes = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0)
                         for h in (threats or [target])][:3]
                 if target not in threats:
@@ -742,7 +757,7 @@ class Bot:
             boost = energy > (45 if light else 25)
         else:
             # unseen attacker: hide from where the shots came from
-            if not zone_urgent and t - self.threat_t < 2.0 and self.threat_bearing is not None \
+            if not zone_urgent and hpf < 0.6 and t - self.threat_t < 2.0 and self.threat_bearing is not None \
                     and not any(h["vis"] for h in threats):
                 bx, by_ = math.cos(self.threat_bearing), math.sin(self.threat_bearing)
                 pseudo = [(x + bx * 70, y + by_ * 70, z + 8.0)]
@@ -981,13 +996,63 @@ class Bot:
                 act["drop"] = tk[1]
 
         self.state = state
-        mf.draw.label(f"{state} hp{hp:.0f} e{energy:.0f} {'T%d' % target['m']['id'] if target else ''}")
+        try:
+            self.debug_draw(obs, me, state, target, threats, hostile, evlog, spot, goal, act, slots,
+                            (zcx, zcy, zr), in_zone, hpf, energy, x, y, z)
+        except Exception:
+            mf.draw.label(state)
         el = (time.perf_counter() - t0) * 1000
         if el > 35:
             self.slow_ticks += 1
             if self.slow_ticks < 20:
                 log(f"slow tick {obs['tick']}: {el:.1f} ms")
         return act
+
+    # ------------------------------------------------------------------ debug
+    def debug_draw(self, obs, me, state, target, threats, hostile, evlog, spot, goal, act, slots,
+                   zc, in_zone, hpf, energy, x, y, z):
+        """Per-decision trace for the team debug file: enough to tell how and why we died."""
+        d = mf.draw
+        t = obs["t"]
+        tgt = ""
+        if target is not None:
+            m = target["m"]
+            tgt = " T%s@%.0f hp%.0f%%%s" % (m["id"], target["d"], target["hpf"] * 100, "" if target["vis"] else " novis")
+        d.label("%s %s hp%.0f e%.0f%s" % (self.name[-2:], state, me["hp"], energy, tgt))
+        w = "/".join(k for k in slots) or "-"
+        gun = slots.get("gun")
+        ammo = ""
+        if gun:
+            ammo = " a%s%s" % (gun[1].get("ammo"), " R" if gun[1].get("reload", 0) > 0 else "")
+        d.text("t%.1f alive%s cubes%s %s%s mhp%.0f" % (t, obs.get("alive"), me.get("cubes", 0), w, ammo, me["max_hp"]))
+        zone = obs["zone"]
+        d.text("zone %s r%.0f nr%.0f dps%s dspot%.0f" % ("IN" if in_zone else "OUT", zc[2], zone["next_radius"],
+                                                       zone.get("dps"), math.hypot(spot[0] - x, spot[1] - y)))
+        if hostile:
+            d.text("seen " + " ".join("%s:%.0f%s%s%s%.0f" % (h["m"]["id"], h["d"], "A" if h["attacked"] else "",
+                                                           "a" if h["aiming"] else "", "v" if h["vis"] else "",
+                                                           h["hpf"] * 100) for h in hostile[:5]))
+        for e in evlog[:8]:
+            d.text(e[:79], None, "#ff4040" if e.startswith("DMG") else "#40ff80")
+        mv = act.get("move", [0, 0])
+        flags = "".join(c for c, k in (("B", "boost"), ("J", "jump"), ("K", "take")) if act.get(k))
+        fire = act.get("fire") or [False, False]
+        d.text("mv%.2f,%.2f %s fire%d%d aim%.2f,%.2f" % (mv[0], mv[1], flags, fire[0], fire[1],
+                                                        act["aim"][0], act["aim"][1]))
+        feet = z + 1.0
+        if target is not None:
+            p = target["m"]["pos"]
+            d.line([x, y, z + 7], [p[0], p[1], p[2] + 4.5], "#ff5040")
+        if goal is not None:
+            d.line([x, y, feet], [goal[0], goal[1], self.nav.ground(goal[0], goal[1]) + 1.0], "#40c0ff")
+        if self.hide_xy is not None and t < self.hide_until:
+            d.point([self.hide_xy[0], self.hide_xy[1], self.nav.ground(*self.hide_xy) + 1.0], "#ffd060", 7)
+        if self.path:
+            for px, py in self.path[self.path_i:self.path_i + 12:3]:
+                d.point([px, py, self.nav.ground(px, py) + 0.5], "#4080ff", 2)
+        if t - self.threat_t < 1.0 and self.threat_bearing is not None:
+            b = self.threat_bearing
+            d.line([x, y, z + 8], [x + 30 * math.cos(b), y + 30 * math.sin(b), z + 8], "#ff00ff")
 
     # ------------------------------------------------------------------ goals & loot
     def reachable_item(self, p):
