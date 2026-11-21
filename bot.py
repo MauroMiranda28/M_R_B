@@ -87,6 +87,11 @@ DANGER_TAU = 20.0        # seconds for a heard fight to fade
 DANGER_CELL = 20.0
 LASER_PEEK = True        # a laser carrier charging at us: duck out of its sight within ~6 m until it fires
 PEEK_HOLD = 1.1          # stay hidden this long after the charge stops (their cooldown is 1.65 s)
+ROOF_CAMP = True         # live on low-exposure roofs inside the next circle (precomputed in roofspots.json)
+ROOF_CAMP_START = 20.0   # grab a nearby weapon first (going up at t=0 scored worse in the sim)
+ROOF_DIST_W = 0.5        # roof choice: exposure*300 + distance*this
+ROOF_MIN_R = 30.0        # no roof camping once the next circle is smaller than this
+ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when attacked)
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
 LASERLESS_EVADE = True   # no laser of our own: break sight with laser carriers beyond 50 m instead of trading
@@ -366,7 +371,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v21"
+    name = "survivor-v22"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -374,6 +379,14 @@ class Bot:
         self.me = int(hello["slot"])
         self.rng = random.Random(int(hello.get("seed", 0)))
         self.nav = Nav(os.path.join(HERE, "nav.bin"))
+        self.roof_spots = []
+        try:
+            self.roof_spots = json.load(open(os.path.join(HERE, "roofspots.json")))["spots"]
+        except Exception:
+            self.roof_spots = []
+        self.camp = None
+        self.on_roof = False
+        self.bad_roofs = set()
         self.plan = Planner(self.nav)
         self.path = None
         self.path_goal = None
@@ -528,6 +541,27 @@ class Bot:
         if e < 1e-6:
             return dx / d, dy / d
         return ex / e, ey / e
+
+    def pick_roof(self, zone, x, y, zcx, zcy, zr):
+        """Keep the current roof while it stays inside the next circle; else the best reachable one."""
+        nc, nr = zone["next_center"], zone["next_radius"]
+        margin = max(15.0, 0.12 * nr)
+
+        def ok(sp):
+            return (sp[0], sp[1]) not in self.bad_roofs and \
+                self.in_circle(sp[0], sp[1], nc[0], nc[1], nr, margin) and \
+                self.in_circle(sp[0], sp[1], zcx, zcy, zr, 20.0)
+        cur = self.camp
+        if cur is not None and ok(cur):
+            return cur
+        best, bs = None, 1e9
+        for sp in self.roof_spots:
+            if not ok(sp):
+                continue
+            sc = sp[3] * 300.0 + math.hypot(sp[0] - x, sp[1] - y) * ROOF_DIST_W
+            if sc < bs:
+                best, bs = sp, sc
+        return best
 
     def quick_cover(self, x, y, eye):
         """A spot within ~7 m, walkable in a straight line, that `eye` cannot see; or None."""
@@ -871,6 +905,15 @@ class Bot:
         zcx, zcy, zr = self.zone_now(zone, t)
         spot, at_spot = self.safe_spot(zone, x, y)
         in_zone = me.get("in_zone", True)
+        if ROOF_CAMP and t >= ROOF_CAMP_START and zone["next_radius"] >= ROOF_MIN_R and self.roof_spots:
+            self.camp = self.pick_roof(zone, x, y, zcx, zcy, zr)
+        else:
+            self.camp = None
+        self.on_roof = False
+        if self.camp is not None:
+            spot = (self.camp[0], self.camp[1])
+            self.on_roof = math.hypot(spot[0] - x, spot[1] - y) < 4.0 and abs(z - self.camp[2]) < 2.5
+            at_spot = self.on_roof
         dist_spot = math.hypot(spot[0] - x, spot[1] - y)
         time_to_shrink = zone["shrink_start"] - t
         travel = dist_spot / max(1.0, stats.get("walk_speed", 11.7))
@@ -930,6 +973,8 @@ class Bot:
             engage = h["attacked"] or d < (45.0 if self.endgame else AGGRO_RANGE) or (h["aiming"] and d < 170) \
                 or (h["hpf"] < 0.35 and d < 170) \
                 or (self.last_target == h["m"]["id"] and t - self.last_target_t < 3)
+            if self.on_roof and not h["attacked"] and d > ROOF_ENGAGE:
+                engage = False
             capturing = DROP_AMBUSH and h["m"]["id"] in drop_holders and d < 170 and hpf > 0.4
             if capturing:
                 engage = True
@@ -995,7 +1040,7 @@ class Bot:
                     break
 
         # ---------- movement goal
-        self.goal_roof = False
+        self.goal_roof = self.camp is not None
         mvx, mvy = 0.0, 0.0
         boost = False
         state = ""
@@ -1160,6 +1205,17 @@ class Bot:
                 mvx, mvy = self.deflect(x, y, mvx, mvy)
                 boost = boost or energy > 40
 
+        # on our roof: fight in place, never strafe off the edge
+        if self.on_roof and self.camp is not None and state in ("fight", "retreat", "hide"):
+            cdx, cdy = self.camp[0] - x, self.camp[1] - y
+            cd = math.hypot(cdx, cdy)
+            if cd > 3.0:
+                mvx, mvy = cdx / cd, cdy / cd
+            else:
+                mvx, mvy = mvx * 0.3, mvy * 0.3
+            boost = False
+            state = "roof-" + state
+
         # incoming projectiles: dodge mortar splash, notice bullets aimed at us
         if DODGE_SHELLS or BULLET_ALERT:
             dz_ = self.projectile_react(obs, x, y, z, vx, vy, t)
@@ -1261,11 +1317,14 @@ class Bot:
 
         # long-term stuck: barely moved in 8 s while trying to travel
         if LONG_STUCK:
-            if not self.prog or t - self.prog[-1][0] >= 1.0:
+            travel = state.split("/")[0] in ("spot", "zone", "loot", "cube", "seek", "explore", "vulture", "roof",
+                                             "loot-death", "farm", "drop")
+            moving_now = math.hypot(mvx, mvy) > 0.3
+            if not (travel and moving_now):
+                self.prog = []  # only measure progress while we are actually trying to travel
+            elif not self.prog or t - self.prog[-1][0] >= 1.0:
                 self.prog.append((t, x, y))
                 self.prog = self.prog[-9:]
-            travel = state.split("/")[0] in ("spot", "zone", "loot", "cube", "seek", "explore", "vulture",
-                                             "loot-death", "farm", "drop")
             near_goal = goal is not None and math.hypot(goal[0] - x, goal[1] - y) < 25.0
             if travel and not near_goal and len(self.prog) >= 9 and t > self.detour_until + 4 and \
                     math.hypot(x - self.prog[0][1], y - self.prog[0][2]) < 5.0 and math.hypot(mvx, mvy) > 0.3:
@@ -1286,6 +1345,9 @@ class Bot:
                         self.detour_until = t + 3.0
                         break
                 self.prog = []
+                if self.camp is not None:
+                    self.bad_roofs.add((self.camp[0], self.camp[1]))
+                    self.camp = None
             if t < self.detour_until and self.detour is not None and state not in ("fight", "retreat", "dodge"):
                 dx_, dy_ = self.detour[0] - x, self.detour[1] - y
                 dd = math.hypot(dx_, dy_)
@@ -1535,6 +1597,9 @@ class Bot:
     def pick_goal(self, obs, x, y, z, hpf, zone, zcx, zcy, zr, slots, weapons, farm):
         t = self.t
         nc, nr = zone["next_center"], zone["next_radius"]
+        if self.camp is not None:
+            self.goal_roof = True
+            return (self.camp[0], self.camp[1], "roof-hold" if self.on_roof else "roof")
         if t < SPAWN_COVER_T:
             if getattr(self, "spawn_cover", None) is None:
                 self.spawn_cover = self.nav.cover_near(x, y, 12) or (x, y)

@@ -3,6 +3,6 @@
 FROM python:3.13.5-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /bot
-COPY mechfight.py bot.py nav.bin ./
+COPY mechfight.py bot.py nav.bin roofspots.json ./
 RUN python3 -m py_compile /bot/bot.py /bot/mechfight.py && chmod -R a+rX /bot
 ENTRYPOINT ["python3", "-u", "/bot/bot.py"]
