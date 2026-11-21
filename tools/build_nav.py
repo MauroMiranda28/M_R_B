@@ -185,8 +185,37 @@ def main(arena, out):
                     if canopy[c] < 255:
                         canopy[c] += 1
 
-    hdr = json.dumps({"nx": nx, "ny": ny, "minX": minx, "minY": miny, "cell": CELL}).encode() + b"\n"
-    data = hdr + bytes(inf) + top.tobytes() + base.tobytes() + surf.tobytes() + otop.tobytes() + bytes(canopy)
+    # fine 1 m line-of-sight layer (the 2 m raster blocked ~5% of real laser hits; exact polygons ~1%)
+    lnx, lny = tnx - 1, tny - 1
+    LN = lnx * lny
+    ltop = array.array("h", [-32768]) * LN
+    lbase = array.array("h", [-32768]) * LN
+    lsurf = array.array("h", [0]) * LN
+    for j in range(lny):
+        r0, r1 = j * tnx, (j + 1) * tnx
+        for i in range(lnx):
+            lsurf[j * lnx + i] = (ter[r0 + i] + ter[r0 + i + 1] + ter[r1 + i] + ter[r1 + i + 1]) // 40
+    for p in prisms:
+        r = p["ring"]
+        xs, ys = r[0::2], r[1::2]
+        i0 = max(0, int(min(xs) - tminx) - 1)
+        i1 = min(lnx - 1, int(max(xs) - tminx) + 1)
+        j0 = max(0, int(min(ys) - tminy) - 1)
+        j1 = min(lny - 1, int(max(ys) - tminy) + 1)
+        pt, pb = int(round(p["top"] * 10)), int(round(p["base"] * 10))
+        for j in range(j0, j1 + 1):
+            cy = tminy + j + 0.5
+            for i in range(i0, i1 + 1):
+                if not in_prism(tminx + i + 0.5, cy, p):
+                    continue
+                c = j * lnx + i
+                ltop[c] = max(ltop[c], pt)
+                lbase[c] = pb if lbase[c] == -32768 else min(lbase[c], pb)
+
+    hdr = json.dumps({"nx": nx, "ny": ny, "minX": minx, "minY": miny, "cell": CELL,
+                      "los": {"nx": lnx, "ny": lny, "minX": tminx, "minY": tminy, "cell": 1.0}}).encode() + b"\n"
+    data = hdr + bytes(inf) + top.tobytes() + base.tobytes() + surf.tobytes() + otop.tobytes() + bytes(canopy) \
+        + ltop.tobytes() + lbase.tobytes() + lsurf.tobytes()
     open(out, "wb").write(zlib.compress(data, 9))
     print("cells", N, "walls", sum(1 for v in blocked if v == 2), "inflated", sum(1 for v in inf if v), "bytes", os.path.getsize(out))
     # ascii preview (every 4th cell)
