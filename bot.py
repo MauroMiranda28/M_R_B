@@ -103,6 +103,7 @@ EDGE_BAND = True         # live in the 60-85% band of the next circle, on the si
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
+LANE_PICK = True         # rotate through the quietest lane (heard-fight map), not the obvious straight line
 ANTI_LASER_ARC = True    # with lightning: a laser carrier charging within 44 m is the top target (short)
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
@@ -383,7 +384,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v24"
+    name = "survivor-v25"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -442,6 +443,8 @@ class Bot:
         self.danger = {}
         self.next_hop = 3.0
         self.corridor = False
+        self.band_target = None
+        self.band_t = -99.0
         self.strike = None
         self.cooldown_spots = []
         self.retreating = False
@@ -503,6 +506,28 @@ class Bot:
             diff = wrap(math.atan2(sy, sx) - ang)
             ang += math.copysign(min(abs(diff), 1.05), diff)  # swing up to 60 deg toward inherited ground
         r = outer if d > outer else (0.5 * (inner + outer) if d < inner else d)
+        if LANE_PICK and self.danger:
+            # pick the quietest lane: among band points within +-60 deg, the one with the least heard
+            # fighting at the destination and half-way there; keep it a while (hysteresis)
+            bt = self.band_target
+            if bt is not None and self.t - self.band_t < 2.0 and \
+                    inner - 5 <= math.hypot(bt[0] - nc[0], bt[1] - nc[1]) <= outer + 5:
+                return bt, False
+            best, bc = None, 1e9
+            for k in (-3, -2, -1, 0, 1, 2, 3):
+                a = ang + k * 0.35
+                px, py = nc[0] + math.cos(a) * r, nc[1] + math.sin(a) * r
+                if not self.nav.free(px, py):
+                    continue
+                cost = 50.0 * self.danger_at(px, py) + 25.0 * self.danger_at((x + px) * 0.5, (y + py) * 0.5) \
+                    + 0.05 * math.hypot(px - x, py - y) + 2.0 * abs(k)
+                if sl >= 5.0 and (math.cos(a) * sx + math.sin(a) * sy) / sl < -0.2:
+                    cost += 20.0  # still on the corridor side
+                if cost < bc:
+                    best, bc = (px, py), cost
+            if best is not None:
+                self.band_target, self.band_t = best, self.t
+                return best, False
         return (nc[0] + math.cos(ang) * r, nc[1] + math.sin(ang) * r), False
 
     def safe_spot(self, z, x, y):
@@ -1878,7 +1903,7 @@ class Bot:
             dist = SOUND_DIST.get(snd.get("dist"), 110.0)
             px, py = x + math.cos(b) * dist, y + math.sin(b) * dist
             ts = t - (snd.get("age") or 0.0)
-            if DANGER_MAP and k in FIGHT_SOUNDS + ("death", "laser_charge"):
+            if (DANGER_MAP or LANE_PICK) and k in FIGHT_SOUNDS + ("death", "laser_charge"):
                 band = {"near": (15.0, 35.0, 55.0), "mid": (70.0, 110.0, 150.0)}.get(snd.get("dist"), (180.0, 240.0, 300.0))
                 w = 2.0 if k == "death" else 1.0
                 for r in band:
