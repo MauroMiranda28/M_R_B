@@ -46,6 +46,11 @@ FARM_UNTIL = 300.0       # ... until this match time
 FARM_RANGE = 260.0       # how far we walk to a remembered crate / drone
 DROP_RANGE = 260.0       # how far we go for a supply drop (3 cubes + full HP/energy)
 CUBE_RANGE = 150.0       # how far we walk to a seen / remembered cube
+VULTURE = True           # walk toward fights we hear, finish the wounded, loot death cubes
+VULTURE_HP = 0.6         # only when at least this healthy
+VULTURE_STANDOFF = 70.0  # stop this far from the estimated fight
+FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion")
+SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -317,7 +322,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v9"
+    name = "survivor-v10"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -358,6 +363,9 @@ class Bot:
         self.known_crates = {}
         self.known_npcs = {}
         self.known_cubes = {}
+        self.fight_snd = []
+        self.death_sites = []
+        self.vulture_until = -99.0
         self.explore_pt = None
         self.explore_t = -99.0
         self.jink = 0.0
@@ -743,6 +751,8 @@ class Bot:
                 continue
             engage = h["attacked"] or d < AGGRO_RANGE or (h["aiming"] and d < 170) or (h["hpf"] < 0.35 and d < 170) \
                 or (self.last_target == h["m"]["id"] and t - self.last_target_t < 3)
+            if VULTURE and t < self.vulture_until and h["hpf"] < 0.65 and d < 170 and hpf > 0.45:
+                engage = True
             if PACIFIST:
                 engage = d < 40 or (h["attacked"] and (d < 75 or h["hpf"] < 0.3)) or \
                     (self.last_target == h["m"]["id"] and t - self.last_target_t < 2 and d < 75)
@@ -758,6 +768,10 @@ class Bot:
             self.last_target_t = t
 
         threats = [h for h in hostile if h["d"] < 150 and (h["attacked"] or h["aiming"] or h["d"] < 90)]
+
+        # listen for fights and deaths (vulture)
+        if VULTURE:
+            self.listen(obs, x, y, t)
 
         # remember crates and drones we have seen (they don't move far)
         if FARM_ROAM:
@@ -1284,11 +1298,61 @@ class Bot:
             if d > want:
                 return (p[0], p[1], "farm")
             return (x, y, "farm")
+        if VULTURE and hpf > VULTURE_HP:
+            g = self.vulture_goal(x, y, zcx, zcy, zr)
+            if g is not None:
+                return g
         if FARM_ROAM and t < FARM_UNTIL and hpf > FARM_HP:
             g = self.roam_goal(x, y, zone, zcx, zcy, zr)
             if g is not None:
                 return g
         return None
+
+    def listen(self, obs, x, y, t):
+        """Turn fight / death sounds into estimated map points (bearing +- 7 deg, coarse range)."""
+        for snd in obs.get("sounds", []):
+            k = snd.get("kind")
+            b = snd.get("bearing")
+            if b is None:
+                continue
+            dist = SOUND_DIST.get(snd.get("dist"), 110.0)
+            px, py = x + math.cos(b) * dist, y + math.sin(b) * dist
+            ts = t - (snd.get("age") or 0.0)
+            if k == "death" and snd.get("dist") in ("near", "mid"):
+                self.death_sites.append((ts, px, py))
+            elif k in FIGHT_SOUNDS and snd.get("dist") in ("near", "mid"):
+                self.fight_snd.append((ts, px, py, snd.get("dist")))
+        self.fight_snd = [f for f in self.fight_snd if t - f[0] < 6.0][-40:]
+        self.death_sites = [d for d in self.death_sites if t - d[0] < 25.0][-8:]
+
+    def vulture_goal(self, x, y, zcx, zcy, zr):
+        t = self.t
+        # a mech just died nearby: its cubes (all it had + 2) are lying there
+        best = None
+        for ts, px, py in self.death_sites:
+            d = math.hypot(px - x, py - y)
+            if d < 170 and self.in_circle(px, py, zcx, zcy, zr, 10) and (best is None or d < best[0]):
+                best = (d, px, py)
+        if best is not None:
+            if best[0] < 8:
+                self.death_sites = [s_ for s_ in self.death_sites if math.hypot(s_[1] - best[1], s_[2] - best[2]) > 8]
+            else:
+                self.vulture_until = t + 6.0
+                return (best[1], best[2], "loot-death")
+        # an ongoing fight: close in to a standoff distance and wait for a weakened survivor
+        recent = [f for f in self.fight_snd if t - f[0] < 4.0]
+        if len(recent) < 2:
+            return None
+        fx = sum(f[1] for f in recent) / len(recent)
+        fy = sum(f[2] for f in recent) / len(recent)
+        if not self.in_circle(fx, fy, zcx, zcy, zr, 20):
+            return None
+        d = math.hypot(fx - x, fy - y)
+        self.vulture_until = t + 6.0
+        if d <= VULTURE_STANDOFF + 10:
+            return (x, y, "vulture")
+        ux, uy = (fx - x) / d, (fy - y) / d
+        return (fx - ux * VULTURE_STANDOFF, fy - uy * VULTURE_STANDOFF, "vulture")
 
     def remember_farm(self, obs, x, y, eye, t):
         kc = self.known_crates
