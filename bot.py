@@ -32,7 +32,7 @@ if VISION_FIRST:
 # v6 = the v1 style (best on the track so far) + projectile awareness.
 # Track scores: v1 3.54 (aggressive, farms) > v3 3.31 > v2 2.85 > v5 2.21 (pacifist, hides, edge, jink).
 PACIFIST = False
-AGGRO_RANGE = 160.0      # engage non-hostile mechs closer than this
+AGGRO_RANGE = 120.0      # engage non-hostile mechs closer than this
 UNSEEN_HIDE_HP = 0.0     # hide from an attacker we can't see below this HP fraction
 SPAWN_COVER_T = 0.0      # seconds after spawn spent getting into cover before looting
 JINK = False             # erratic sidesteps all the time, not only when hit
@@ -58,15 +58,17 @@ COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% 
 WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
 # duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
 # v21 resets these to the v14 values (v20's duel tuning scored 3.52 on the track)
-STRAFE_MIN, STRAFE_MAX = 0.3, 0.7   # seconds between direction changes
+STRAFE_MIN, STRAFE_MAX = 0.5, 1.1   # seconds between direction changes
 STRAFE_FLIP_P = 1.0                 # chance a change actually reverses direction
 STRAFE_W = 1.4                      # sideways weight vs the range-keeping component
-FIGHT_BOOST_E = 55.0                # boost while fighting above this energy
+FIGHT_BOOST_E = 70.0                # boost while fighting above this energy
 REGEN_FIRST = 0.0                   # don't shoot crates / drones below this HP: dealing damage blocks regen
 LEAD_K = 1.0                        # fraction of the computed gun lead we apply
-JUMP_FIGHT = (1.6, 3.2)             # in a fight, hop every this many seconds (random), 0 = never
-JUMP_TRAVEL = (5.0, 9.0)            # while travelling, an occasional hop
-GUN_FIGHT_RANGE = 60.0              # preferred distance with gun / laser
+JUMP_FIGHT = 0                      # in a fight, hop every this many seconds (random), 0 = never
+JUMP_TRAVEL = 0                     # while travelling, an occasional hop
+LASER_DODGE_JUMP = False            # top bots are airborne 1% of fights: sidestep a charging laser, don't hop
+CALM_SPEED = 0.7                    # top-5 leaderboard bots: ~6 m/s and no boost when not fighting
+GUN_FIGHT_RANGE = 100.0             # preferred distance with gun / laser
 COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
 LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
@@ -384,7 +386,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v27"
+    name = "survivor-v28"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -1287,7 +1289,7 @@ class Bot:
             if zone_urgent:
                 goal = spot
                 state = "zone"
-                boost = (not in_zone) or (energy > 70 and dist_spot > 60)
+                boost = (not in_zone) or time_to_shrink < travel + 5
             elif hiding:
                 goal = self.hide_xy
                 state = "hide"
@@ -1361,9 +1363,18 @@ class Bot:
                 mvy += bx * self.strafe * 1.2
                 mvx, mvy = self.deflect(x, y, mvx, mvy)
                 boost = energy > 15
-                if me.get("grounded") and t - cs > 0.45:
+                if LASER_DODGE_JUMP and me.get("grounded") and t - cs > 0.45:
                     jump = True
                 break
+
+        # calm travel like the top leaderboard bots: slower, no boost unless the zone is on us
+        if CALM_SPEED < 1.0 and in_zone and state.split("/")[0] in (
+                "spot", "zone", "loot", "cube", "seek", "explore", "vulture", "loot-death", "farm", "hold", "drop",
+                "drop-wait") and t - self.threat_t > 3.0 and time_to_shrink > travel + 5 and not jump:
+            ml_ = math.hypot(mvx, mvy)
+            if ml_ > CALM_SPEED:
+                mvx, mvy = mvx / ml_ * CALM_SPEED, mvy / ml_ * CALM_SPEED
+            boost = False
 
         # hop every now and then: harder to hit, more erratic
         if me.get("grounded") and not jump and t >= self.next_hop:
