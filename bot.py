@@ -41,6 +41,7 @@ FIGHT_HIDE = False       # break line of sight mid-fight when losing
 FARM_NPC_R, FARM_CRATE_R, FARM_CRATE_T, FARM_HP = 75.0, 55.0, 260.0, 0.6
 DODGE_SHELLS = True      # run out of the splash of incoming mortar shells
 BULLET_ALERT = True      # turn toward bullets flying at us before they land
+CALM_STILL = True        # scout data: top-3 bots stand still 40% of calm time (bottom: 16%); no blind exploring
 FARM_ROAM = True         # actively hunt crates and drones for cubes early on
 FARM_UNTIL = 300.0       # ... until this match time
 FARM_RANGE = 260.0       # how far we walk to a remembered crate / drone
@@ -52,7 +53,7 @@ VULTURE_STANDOFF = 45.0  # stop this far from the estimated fight
 FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion")
 SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 # v11 small-tweaks package
-GUN_MAX_RANGE = 150.0    # don't give our position away with low-odds long gun shots (unless they attack us)
+GUN_MAX_RANGE = 120.0    # don't give our position away with low-odds long gun shots (unless they attack us)
 COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% cook-off)
 WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
 # duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
@@ -383,7 +384,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v24"
+    name = "survivor-v27"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -484,8 +485,8 @@ class Bot:
         self.corridor = False
         if R < 40:
             return None
-        outer = R - max(15.0, 0.15 * R)
-        inner = 0.6 * R
+        outer = R - max(22.0, 0.25 * R)   # 50-75% of the radius: room to manoeuvre when the zone moves
+        inner = 0.5 * R
         dx, dy = x - nc[0], y - nc[1]
         d = math.hypot(dx, dy)
         sx, sy = nc[0] - c[0], nc[1] - c[1]
@@ -2022,6 +2023,8 @@ class Bot:
                 self.known_crates.pop(best[2], None)  # got there, nothing to shoot: gone
                 return None
             return self.item_goal(p, "seek")
+        if CALM_STILL:
+            return None  # only go for crates / drones we have seen; otherwise hold our spot
         ep = self.explore_pt
         if ep is None or math.hypot(ep[0] - x, ep[1] - y) < 12 or t - self.explore_t > 25 or \
                 not self.in_circle(ep[0], ep[1], zcx, zcy, zr, 40):
