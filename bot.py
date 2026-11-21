@@ -57,6 +57,8 @@ class Nav:
         o += 2 * n
         self.otop = array.array("h")
         self.otop.frombytes(raw[o:o + 2 * n])
+        o += 2 * n
+        self.canopy = raw[o:o + n] if len(raw) >= o + n else bytes(n)
         if sys.byteorder != "little":
             for a in (self.top, self.base, self.surf, self.otop):
                 a.byteswap()
@@ -136,14 +138,24 @@ class Nav:
             return True
         step = 1.5
         n = int(d / step)
-        top, base, surf, idx = self.top, self.base, self.surf, self.idx
-        k0 = 1
+        top, base, surf = self.top, self.base, self.surf
         kend = n - int(skip_end / step)
-        for k in range(k0, kend + 1):
-            f = k / n
-            x, y, z = a[0] + dx * f, a[1] + dy * f, a[2] + dz * f
-            c = idx(x, y)
-            zz = z * 10.0
+        if kend < 1:
+            return True
+        inv, nx, ny = self.inv, self.nx, self.ny
+        # walk in grid units; z in decimeters
+        gx = (a[0] - self.minx) * inv
+        gy = (a[1] - self.miny) * inv
+        gz = a[2] * 10.0
+        sx, sy, sz = dx * inv / n, dy * inv / n, dz * 10.0 / n
+        nxm, nym = nx - 1, ny - 1
+        for k in range(1, kend + 1):
+            i = int(gx + sx * k)
+            j = int(gy + sy * k)
+            if i < 0 or j < 0 or i > nxm or j > nym:
+                continue
+            c = j * nx + i
+            zz = gz + sz * k
             t = top[c]
             if t != UNSET and base[c] - 5 <= zz <= t:
                 return False
@@ -170,9 +182,10 @@ class Nav:
                 for o in (2, -2, 2 * nx, -2 * nx, 2 + 2 * nx, 2 - 2 * nx, -2 + 2 * nx, -2 - 2 * nx):
                     if blk[c + o] == 2:
                         walls += 1
-                if walls == 0:
+                can = self.canopy[c]
+                if walls == 0 and can < 2:
                     continue
-                s = math.hypot(di, dj) - 0.8 * min(walls, 3)
+                s = math.hypot(di, dj) - 0.8 * min(walls, 3) - 0.35 * min(can, 8)
                 if s < bs:
                     bs, best = s, c
         return self.center(best) if best is not None else None
@@ -281,7 +294,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v1"
+    name = "survivor-v2"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -318,6 +331,9 @@ class Bot:
         self.cover_for = None
         self.state = ""
         self.slow_ticks = 0
+        self.hide_xy = None
+        self.hide_until = -99.0
+        self.hide_t = -99.0
         gc.collect()
         gc.freeze()
 
@@ -402,6 +418,50 @@ class Bot:
             return dx / d, dy / d
         return ex / e, ey / e
 
+    def hidden_from(self, px, py, eyes):
+        g = self.nav.ground(px, py)
+        for e in eyes:
+            if self.nav.los(e, (px, py, g + 8.6), skip_end=1.0) or self.nav.los(e, (px, py, g + 4.5), skip_end=1.0):
+                return False
+        return True
+
+    def hide_spot(self, x, y, eyes, zc, t):
+        """Nearest reachable free spot that no threat eye can see; cached briefly."""
+        if self.hide_xy is not None and t - self.hide_t < 0.7:
+            return self.hide_xy
+        deadline = time.perf_counter() + 0.006
+        if self.hide_xy is not None and math.hypot(self.hide_xy[0] - x, self.hide_xy[1] - y) < 50 and \
+                self.hidden_from(self.hide_xy[0], self.hide_xy[1], eyes):
+            self.hide_t = t
+            return self.hide_xy
+        nav = self.nav
+        zcx, zcy, zr = zc
+        ex = sum(e[0] for e in eyes) / len(eyes)
+        ey = sum(e[1] for e in eyes) / len(eyes)
+        dnow = math.hypot(ex - x, ey - y)
+        cands = []
+        for r in (4.0, 8.0, 13.0, 19.0, 26.0, 34.0, 44.0, 56.0, 70.0):
+            for k in range(16 if r < 40 else 24):
+                a = k * TAU / 16 + r * 0.37
+                px, py = x + r * math.cos(a), y + r * math.sin(a)
+                if nav.blk[nav.idx(px, py)] != 0:
+                    continue
+                if not self.in_circle(px, py, zcx, zcy, zr, 8.0):
+                    continue
+                closer = max(0.0, dnow - math.hypot(ex - px, ey - py))
+                cands.append((r + 1.2 * closer, px, py, r))
+        cands.sort()
+        found = None
+        for sc, px, py, r in cands[:70]:
+            if time.perf_counter() > deadline:
+                break
+            if self.hidden_from(px, py, eyes):
+                found = (px, py)
+                break
+        self.hide_t = t
+        self.hide_xy = found
+        return found
+
     def climb_ctl(self, x, y, z, mx, my, grounded, energy, urgent):
         m = math.hypot(mx, my)
         if m < 0.3:
@@ -466,7 +526,7 @@ class Bot:
     # ------------------------------------------------------------------ main
     def act(self, obs):
         t0 = time.perf_counter()
-        budget_end = t0 + 0.016
+        budget_end = t0 + 0.011
         self.t = t = obs["t"]
         me = obs["self"]
         x, y, z = me["pos"]
@@ -575,7 +635,7 @@ class Bot:
             d = h["d"]
             if not h["vis"] or d > max_range:
                 continue
-            engage = h["attacked"] or d < 95 or (h["aiming"] and d < 170) or (h["hpf"] < 0.35 and d < 170) \
+            engage = h["attacked"] or d < 60 or (h["aiming"] and d < 170) or (h["hpf"] < 0.35 and d < 170) \
                 or (self.last_target == h["m"]["id"] and t - self.last_target_t < 3)
             if not engage:
                 continue
@@ -595,15 +655,15 @@ class Bot:
         farm = None
         if target is None and calm and hpf > 0.5:
             for d, m in npcs:
-                if d < 75 and nav.los((x, y, eye), center_of(m)):
+                if d < 60 and nav.los((x, y, eye), center_of(m)):
                     farm = ("npc", m)
                     break
-            if farm is None and t < 260 and hpf > 0.6:
+            if farm is None and t < 170 and hpf > 0.7:
                 best = None
                 for c in obs.get("crates", []):
                     p = c["pos"]
                     d = math.hypot(p[0] - x, p[1] - y)
-                    if d < 55 and (best is None or d < best[0]) and \
+                    if d < 40 and (best is None or d < best[0]) and \
                             nav.los((x, y, eye), (p[0], p[1], p[2] + 1.2)):
                         best = (d, c)
                 if best:
@@ -637,7 +697,18 @@ class Bot:
                 pref = 75.0
             else:
                 pref = 60.0
-            if retreat:
+            # trade shots in the open only when clearly winning; otherwise break line of sight and heal
+            press = (my_power > their_power * 1.35 and nthreat <= 1 and hpf > 0.5) or \
+                (target["hpf"] < 0.25 and hpf > 0.35 and nthreat <= 1) or \
+                (light and d < 35 and my_power > their_power * 1.1 and nthreat <= 1)
+            hide_xy = None
+            if not press and not zone_urgent:
+                eyes = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0)
+                        for h in (threats or [target])][:3]
+                if target not in threats:
+                    eyes.append((p[0], p[1], p[2] + 8.0))
+                hide_xy = self.hide_spot(x, y, eyes, (zcx, zcy, zr), t)
+            if retreat and hide_xy is None:
                 radial = -1.0
                 state = "retreat"
             else:
@@ -650,6 +721,13 @@ class Bot:
             strafe_w = 0.55 if retreat else 0.9
             mvx = ux * radial + sx * strafe_w
             mvy = uy * radial + sy * strafe_w
+            if hide_xy is not None:
+                state = "hide"
+                hx, hy = self.nav_move(x, y, hide_xy[0], hide_xy[1], budget_end)
+                if math.hypot(hide_xy[0] - x, hide_xy[1] - y) < 2.0:
+                    hx, hy = 0.0, 0.0
+                mvx, mvy = hx + sx * 0.25, hy + sy * 0.25
+                self.hide_until = t + 6.0
             if zone_urgent:
                 zx, zy = self.nav_move(x, y, spot[0], spot[1], budget_end)
                 mvx, mvy = zx * 1.0 + sx * 0.4, zy * 1.0 + sy * 0.4
@@ -663,10 +741,25 @@ class Bot:
             mvx, mvy = self.deflect(x, y, mvx, mvy)
             boost = energy > (45 if light else 25)
         else:
+            # unseen attacker: hide from where the shots came from
+            if not zone_urgent and t - self.threat_t < 2.0 and self.threat_bearing is not None \
+                    and not any(h["vis"] for h in threats):
+                bx, by_ = math.cos(self.threat_bearing), math.sin(self.threat_bearing)
+                pseudo = [(x + bx * 70, y + by_ * 70, z + 8.0)]
+                hs = self.hide_spot(x, y, pseudo, (zcx, zcy, zr), t)
+                if hs is not None:
+                    self.hide_until = t + 6.0
+            hiding = (not zone_urgent and self.hide_xy is not None and t < self.hide_until)
+            if hiding and hpf < 0.9 and t - self.threat_t < 25:
+                self.hide_until = max(self.hide_until, t + 0.5)  # stay put while regenerating
             if zone_urgent:
                 goal = spot
                 state = "zone"
                 boost = (not in_zone) or (energy > 70 and dist_spot > 60)
+            elif hiding:
+                goal = self.hide_xy
+                state = "hide"
+                boost = energy > 30 and math.hypot(goal[0] - x, goal[1] - y) > 8
             else:
                 goal = self.pick_goal(obs, x, y, z, hpf, zone, zcx, zcy, zr, slots, weapons, farm)
                 if goal is None:
@@ -696,7 +789,7 @@ class Bot:
                     if state == "hold" and gd < 6:
                         mvx, mvy = mvx * 0.4, mvy * 0.4  # quiet approach
             # unseen attacker: sidestep while turning to face it
-            if t - self.threat_t < 2.5 and self.threat_bearing is not None:
+            if state != "hide" and t - self.threat_t < 2.5 and self.threat_bearing is not None:
                 bx, by_ = math.cos(self.threat_bearing), math.sin(self.threat_bearing)
                 if t > self.strafe_t:
                     self.strafe = -self.strafe

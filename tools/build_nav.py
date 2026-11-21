@@ -9,6 +9,7 @@ nav.bin = zlib( header(json, \n) + blocked[u8 * N] + top[i16 * N] + base[i16 * N
   top/base: highest top / lowest base (decimeters) of solids whose footprint covers the cell centre
             (base=top=-32768 when none); used for line of sight
   surf: walkable surface height at the cell centre (decimeters): terrain, or a low bridge deck
+  canopy: number of low tree crowns within 8 m of the cell centre (u8 * N)
   otop: height (decimeters) to clear to get onto the cell (roof top / highest terrain sample)
 """
 import array
@@ -164,8 +165,28 @@ def main(arena, out):
                     if 0 <= a < nx and 0 <= b < ny and inf[b * nx + a] == 0:
                         inf[b * nx + a] = 1
 
+    # canopy: tree crowns (low enough to hide a mech) within 8 m of the cell centre
+    canopy = bytearray(N)
+    tr = w["trees"]
+    f = tr["fields"]
+    nf = len(f)
+    td = tr["data"]
+    fx, fy, fz, fcr, fcb = (f.index("crownX") if "crownX" in f else f.index("x")),         (f.index("crownY") if "crownY" in f else f.index("y")), f.index("z"), f.index("crownR"), f.index("crownBase")
+    for k in range(0, len(td), nf):
+        cx, cy, cz, cr, cb = td[k + fx], td[k + fy], td[k + fz], td[k + fcr], td[k + fcb]
+        if cb - cz > 8.0:
+            continue
+        reach = cr + 8.0
+        for j in range(max(0, int((cy - reach - miny) / CELL)), min(ny, int((cy + reach - miny) / CELL) + 1)):
+            for i in range(max(0, int((cx - reach - minx) / CELL)), min(nx, int((cx + reach - minx) / CELL) + 1)):
+                px, py = minx + (i + 0.5) * CELL, miny + (j + 0.5) * CELL
+                if math.hypot(px - cx, py - cy) <= reach:
+                    c = j * nx + i
+                    if canopy[c] < 255:
+                        canopy[c] += 1
+
     hdr = json.dumps({"nx": nx, "ny": ny, "minX": minx, "minY": miny, "cell": CELL}).encode() + b"\n"
-    data = hdr + bytes(inf) + top.tobytes() + base.tobytes() + surf.tobytes() + otop.tobytes()
+    data = hdr + bytes(inf) + top.tobytes() + base.tobytes() + surf.tobytes() + otop.tobytes() + bytes(canopy)
     open(out, "wb").write(zlib.compress(data, 9))
     print("cells", N, "walls", sum(1 for v in blocked if v == 2), "inflated", sum(1 for v in inf if v), "bytes", os.path.getsize(out))
     # ascii preview (every 4th cell)
