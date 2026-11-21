@@ -58,6 +58,10 @@ WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right afte
 COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
 LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
+# lightning counters the built-ins' lasers (short) and auto-aims: prefer it, fight close, rush chargers
+LIGHTNING_BRAWL = True
+if LIGHTNING_BRAWL:
+    WANT_WEAPON = {"lightning": 3, "laser": 2}
 
 
 def wrap(a):
@@ -328,7 +332,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v11"
+    name = "survivor-v12"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -841,8 +845,8 @@ class Bot:
             their_power = target["hpf"] * (1.0 + 0.04 * min(m.get("cubes", 0) or 0, 10))
             retreat = (hpf < 0.35 and their_power > my_power * 0.7) or nthreat >= 3 or \
                 (nthreat >= 2 and hpf < 0.6)
-            if light and not retreat and my_power > their_power * 1.1:
-                pref = 26.0
+            if light and not retreat and (LIGHTNING_BRAWL or my_power > their_power * 1.1):
+                pref = 28.0 if LIGHTNING_BRAWL else 26.0
             elif laser or gun:
                 pref = 75.0
             else:
@@ -895,6 +899,13 @@ class Bot:
                     mvx, mvy = mvx * 0.3 + zx / zd, mvy * 0.3 + zy / zd
             mvx, mvy = self.deflect(x, y, mvx, mvy)
             boost = energy > max(COMBAT_ENERGY_KEEP, 45 if light else 25)
+            if LIGHTNING_BRAWL and light and not retreat and state == "fight":
+                if m.get("charging") and d < 90:
+                    # their laser is charging: close in, the arc shorts it out
+                    mvx, mvy = self.deflect(x, y, ux + sx * 0.3, uy + sy * 0.3)
+                    boost = energy > 12
+                elif d > 45:
+                    boost = energy > 30
         else:
             # unseen attacker: hide from where the shots came from
             if not zone_urgent and hpf < UNSEEN_HIDE_HP and t - self.threat_t < 2.0 and self.threat_bearing is not None \
@@ -1314,10 +1325,14 @@ class Bot:
                 return (p[0], p[1], "drop")
         # weapon
         have_empty = any(w is None for w in weapons)
-        if have_empty:
+        swap_light = LIGHTNING_BRAWL and not have_empty and "lightning" not in slots and \
+            "laser" in slots and "gun" in slots
+        if have_empty or swap_light:
             best = None
             for pk in obs.get("pickups", []):
                 if pk["kind"] not in WANT_WEAPON or pk["kind"] in slots:
+                    continue
+                if swap_light and pk["kind"] != "lightning":
                     continue
                 if self.bad_pickups.get(pk["id"], -1) > t:
                     continue
@@ -1509,6 +1524,9 @@ class Bot:
                 m = slots.get("mortar")
                 if m is not None:
                     return (pk["id"], m[0])
+                # gun + laser and a lightning here: laser + lightning beats gun + laser
+                if LIGHTNING_BRAWL and k == "lightning" and "laser" in slots and slots.get("gun") is not None:
+                    return (pk["id"], slots["gun"][0])
         return None
 
 
