@@ -32,7 +32,7 @@ if VISION_FIRST:
 # v6 = the v1 style (best on the track so far) + projectile awareness.
 # Track scores: v1 3.54 (aggressive, farms) > v3 3.31 > v2 2.85 > v5 2.21 (pacifist, hides, edge, jink).
 PACIFIST = False
-AGGRO_RANGE = 95.0       # engage non-hostile mechs closer than this
+AGGRO_RANGE = 160.0      # engage non-hostile mechs closer than this
 UNSEEN_HIDE_HP = 0.0     # hide from an attacker we can't see below this HP fraction
 SPAWN_COVER_T = 0.0      # seconds after spawn spent getting into cover before looting
 JINK = False             # erratic sidesteps all the time, not only when hit
@@ -48,7 +48,7 @@ DROP_RANGE = 260.0       # how far we go for a supply drop (3 cubes + full HP/en
 CUBE_RANGE = 150.0       # how far we walk to a seen / remembered cube
 VULTURE = True           # walk toward fights we hear, finish the wounded, loot death cubes
 VULTURE_HP = 0.6         # only when at least this healthy
-VULTURE_STANDOFF = 70.0  # stop this far from the estimated fight
+VULTURE_STANDOFF = 45.0  # stop this far from the estimated fight
 FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion")
 SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 # v11 small-tweaks package
@@ -64,6 +64,7 @@ LIGHTNING_BRAWL = True
 ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
 EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
+GUN_FIGHT_RANGE = 55.0   # preferred fight distance with gun / laser (was 75)
 ENDGAME_ALIVE = 3        # with this few mechs left: no farming / vulture, start fights only under 45 m
 ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
@@ -339,7 +340,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v14"
+    name = "survivor-v16"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -868,7 +869,7 @@ class Bot:
             if light and not retreat and (LIGHTNING_BRAWL or my_power > their_power * 1.1):
                 pref = 28.0 if LIGHTNING_BRAWL else 26.0
             elif laser or gun:
-                pref = 75.0
+                pref = GUN_FIGHT_RANGE
             else:
                 pref = 60.0
             # trade shots in the open only when clearly winning; otherwise break line of sight and heal
