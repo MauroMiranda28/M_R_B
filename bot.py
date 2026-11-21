@@ -70,7 +70,11 @@ if LIGHTNING_BRAWL:
     WANT_WEAPON = {"lightning": 3, "laser": 2}
 # artillery: carry a mortar, lob it at tracked mechs 35-225 m away, high arc over buildings at hidden ones
 MORTAR_MODE = False      # v17 experiment; off here so v18 measures anti-focus alone
-ANTI_FOCUS = True        # 2+ mechs aiming at / hitting us: break line of sight with all of them for ~6 s
+ANTI_FOCUS = False       # 2+ mechs aiming at / hitting us: break line of sight with all of them for ~6 s
+DANGER_MAP = True        # early on, farm / explore away from where we hear fighting
+DANGER_UNTIL = 90.0      # ... during the first seconds (the opening is the bloodiest part)
+DANGER_TAU = 20.0        # seconds for a heard fight to fade
+DANGER_CELL = 20.0
 ANTI_FOCUS_HOLD = 6.0    # just over their 5 s tracking memory
 MORTAR_VISIBLE_MIN = 110.0  # lob at visible mechs only beyond this; hidden ones at any range 35-225 m
 if MORTAR_MODE:
@@ -346,7 +350,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v18"
+    name = "survivor-v19"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -394,6 +398,7 @@ class Bot:
         self.path_roof = False
         self.endgame = False
         self.focus_hide_until = -99.0
+        self.danger = {}
         self.prog = []
         self.detour = None
         self.detour_until = -99.0
@@ -919,7 +924,7 @@ class Bot:
         focused = ANTI_FOCUS and len(focus_ids) >= 2 and len(focus_eyes) >= 1
 
         # listen for fights and deaths (vulture)
-        if VULTURE:
+        if VULTURE or DANGER_MAP:
             self.listen(obs, x, y, t)
 
         # remember crates and drones we have seen (they don't move far)
@@ -1536,7 +1541,7 @@ class Bot:
             return (x, y, "farm")
         if self.endgame:
             return None
-        if VULTURE and hpf > VULTURE_HP:
+        if VULTURE and hpf > VULTURE_HP and not (DANGER_MAP and t < DANGER_UNTIL):
             g = self.vulture_goal(x, y, zcx, zcy, zr)
             if g is not None:
                 return g
@@ -1545,6 +1550,26 @@ class Bot:
             if g is not None:
                 return g
         return None
+
+    def add_danger(self, px, py, w, t):
+        c = (int(px // DANGER_CELL), int(py // DANGER_CELL))
+        old = self.danger.get(c)
+        cur = old[0] * math.exp(-(t - old[1]) / DANGER_TAU) if old else 0.0
+        self.danger[c] = (cur + w, t)
+
+    def danger_at(self, px, py):
+        """Decayed fight-sound weight around a point (its cell full, neighbours half)."""
+        if not self.danger:
+            return 0.0
+        t = self.t
+        ci, cj = int(px // DANGER_CELL), int(py // DANGER_CELL)
+        tot = 0.0
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                v = self.danger.get((ci + di, cj + dj))
+                if v is not None:
+                    tot += v[0] * math.exp(-(t - v[1]) / DANGER_TAU) * (1.0 if di == 0 and dj == 0 else 0.5)
+        return tot
 
     def listen(self, obs, x, y, t):
         """Turn fight / death sounds into estimated map points (bearing +- 7 deg, coarse range)."""
@@ -1556,6 +1581,12 @@ class Bot:
             dist = SOUND_DIST.get(snd.get("dist"), 110.0)
             px, py = x + math.cos(b) * dist, y + math.sin(b) * dist
             ts = t - (snd.get("age") or 0.0)
+            if DANGER_MAP and k in FIGHT_SOUNDS + ("death", "laser_charge"):
+                band = {"near": (15.0, 35.0, 55.0), "mid": (70.0, 110.0, 150.0)}.get(snd.get("dist"), (180.0, 240.0, 300.0))
+                w = 2.0 if k == "death" else 1.0
+                for r in band:
+                    for db in (-0.12, 0.0, 0.12):  # bearing error is ~7 deg
+                        self.add_danger(x + math.cos(b + db) * r, y + math.sin(b + db) * r, w / 9.0, ts)
             if k == "death" and snd.get("dist") in ("near", "mid"):
                 self.death_sites.append((ts, px, py))
             elif k in FIGHT_SOUNDS and snd.get("dist") in ("near", "mid"):
@@ -1636,12 +1667,16 @@ class Bot:
             if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25) or not self.reachable_item(p):
                 continue
             d = math.hypot(p[0] - x, p[1] - y)
+            if DANGER_MAP and t < DANGER_UNTIL:
+                d += 40.0 * self.danger_at(p[0], p[1])
             if d < FARM_RANGE and (best is None or d < best[0]):
                 best = (d, p, cid, "crate")
         for nid, (p, ts) in self.known_npcs.items():
             if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25):
                 continue
             d = math.hypot(p[0] - x, p[1] - y) - 25.0  # 2 cubes: worth a detour
+            if DANGER_MAP and t < DANGER_UNTIL:
+                d += 40.0 * self.danger_at(p[0], p[1])
             if d < FARM_RANGE and (best is None or d < best[0]):
                 best = (d, p, nid, "npc")
         if best is not None:
@@ -1661,7 +1696,10 @@ class Bot:
                 px, py = x + r * math.cos(a), y + r * math.sin(a)
                 if not self.in_circle(px, py, zcx, zcy, zr, 45) or not nav.free(px, py):
                     continue
-                cands.append((math.hypot(px - nc[0], py - nc[1]) + self.rng.uniform(0, 80), px, py))
+                sc_ = math.hypot(px - nc[0], py - nc[1]) + self.rng.uniform(0, 80)
+                if DANGER_MAP and t < DANGER_UNTIL:
+                    sc_ += 100.0 * self.danger_at(px, py) + 50.0 * self.danger_at((x + px) * 0.5, (y + py) * 0.5)
+                cands.append((sc_, px, py))
             if not cands:
                 return None
             cands.sort()
