@@ -60,6 +60,9 @@ LONG_STUCK = True        # no real progress for 8 s while travelling: drop the r
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 # lightning counters the built-ins' lasers (short) and auto-aims: prefer it, fight close, rush chargers
 LIGHTNING_BRAWL = True
+# a quarter of crates / loot sit on roofs, uncontested: jet up to roofs this low (m above the street)
+ROOFS = True
+ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
     WANT_WEAPON = {"lightning": 3, "laser": 2}
 
@@ -242,10 +245,11 @@ class Planner:
         self.goal_xy = None
         self.result = None  # list of (x, y) or [] on failure
 
-    def start(self, sx, sy, gx, gy):
+    def start(self, sx, sy, gx, gy, roof=False):
         nav = self.nav
         s = nav.idx(sx, sy)
-        g = nav.snap(gx, gy, 20)
+        gc = nav.idx(gx, gy)
+        g = gc if (roof and nav.blk[gc] == 2) else nav.snap(gx, gy, 20)
         self.goal_xy = (gx, gy)
         self.result = None
         if s is None or g is None:
@@ -332,7 +336,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v12"
+    name = "survivor-v13"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -376,6 +380,8 @@ class Bot:
         self.fight_snd = []
         self.death_sites = []
         self.vulture_until = -99.0
+        self.goal_roof = False
+        self.path_roof = False
         self.prog = []
         self.detour = None
         self.detour_until = -99.0
@@ -429,7 +435,7 @@ class Bot:
             return (nc[0], nc[1]), False
         return (nc[0] + (x - nc[0]) / d * rr, nc[1] + (y - nc[1]) / d * rr), False
 
-    def nav_move(self, x, y, gx, gy, budget_end):
+    def nav_move(self, x, y, gx, gy, budget_end, roof=False):
         """Unit move vector toward goal following the planned path."""
         nav = self.nav
         dx, dy = gx - x, gy - y
@@ -440,7 +446,7 @@ class Bot:
             self.path = None
             return dx / d, dy / d
         # (re)plan?
-        need = (self.path is None or self.path_goal is None
+        need = (self.path is None or self.path_goal is None or roof != self.path_roof
                 or math.hypot(self.path_goal[0] - gx, self.path_goal[1] - gy) > 8.0
                 or self.t - self.path_t > 12.0)
         if self.path and not need:
@@ -450,12 +456,13 @@ class Bot:
         if need:
             if not self.plan.active or self.plan.goal_xy is None or \
                     math.hypot(self.plan.goal_xy[0] - gx, self.plan.goal_xy[1] - gy) > 8.0:
-                self.plan.start(x, y, gx, gy)
+                self.plan.start(x, y, gx, gy, roof)
             self.plan.step(budget_end)
             if not self.plan.active and self.plan.result is not None:
                 res = self.plan.result
                 self.plan.result = None
                 self.path_t = self.t
+                self.path_roof = roof
                 self.path_goal = self.plan.goal_xy
                 if res:
                     self.path = res
@@ -830,6 +837,7 @@ class Bot:
                     break
 
         # ---------- movement goal
+        self.goal_roof = False
         mvx, mvy = 0.0, 0.0
         boost = False
         state = ""
@@ -958,7 +966,7 @@ class Bot:
             if goal is not None:
                 gd = math.hypot(goal[0] - x, goal[1] - y)
                 if gd > 1.5:
-                    mvx, mvy = self.nav_move(x, y, goal[0], goal[1], budget_end)
+                    mvx, mvy = self.nav_move(x, y, goal[0], goal[1], budget_end, self.goal_roof)
                     if state == "hold" and gd < 6:
                         mvx, mvy = mvx * 0.4, mvy * 0.4  # quiet approach
             # unseen attacker: sidestep while turning to face it
@@ -1291,7 +1299,15 @@ class Bot:
 
     # ------------------------------------------------------------------ goals & loot
     def reachable_item(self, p):
-        return p[2] - self.nav.ground(p[0], p[1]) < 2.5
+        rise = p[2] - self.nav.ground(p[0], p[1])
+        if rise < 2.5:
+            return True
+        return ROOFS and rise <= ROOF_MAX and abs(p[2] - self.nav.stand_at(p[0], p[1])) < 2.5
+
+    def item_goal(self, p, state):
+        """Goal tuple for an item; flags roof goals so the planner keeps them on the roof."""
+        self.goal_roof = ROOFS and p[2] - self.nav.ground(p[0], p[1]) >= 2.5
+        return (p[0], p[1], state)
 
     def pick_goal(self, obs, x, y, z, hpf, zone, zcx, zcy, zr, slots, weapons, farm):
         t = self.t
@@ -1344,7 +1360,7 @@ class Bot:
                 if d < 110 and (best is None or s < best[0]):
                     best = (s, p)
             if best:
-                return (best[1][0], best[1][1], "loot")
+                return self.item_goal(best[1], "loot")
         # cubes (seen now or remembered)
         best = None
         cubes_all = list(obs.get("cubes", []))
@@ -1361,7 +1377,7 @@ class Bot:
             if best is None or d < best[0]:
                 best = (d, p)
         if best:
-            return (best[1][0], best[1][1], "cube")
+            return self.item_goal(best[1], "cube")
         # farming target: get within comfortable range
         if farm is not None:
             kind, m = farm
@@ -1369,7 +1385,7 @@ class Bot:
             d = math.hypot(p[0] - x, p[1] - y)
             want = 22.0 if slots.get("lightning") else 35.0
             if d > want:
-                return (p[0], p[1], "farm")
+                return self.item_goal(p, "farm")
             return (x, y, "farm")
         if VULTURE and hpf > VULTURE_HP:
             g = self.vulture_goal(x, y, zcx, zcy, zr)
@@ -1468,7 +1484,7 @@ class Bot:
         nav = self.nav
         best = None
         for cid, (p, ts) in self.known_crates.items():
-            if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25) or p[2] - nav.ground(p[0], p[1]) > 2.5:
+            if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25) or not self.reachable_item(p):
                 continue
             d = math.hypot(p[0] - x, p[1] - y)
             if d < FARM_RANGE and (best is None or d < best[0]):
@@ -1484,7 +1500,7 @@ class Bot:
             if math.hypot(p[0] - x, p[1] - y) < 6.0 and best[3] == "crate":
                 self.known_crates.pop(best[2], None)  # got there, nothing to shoot: gone
                 return None
-            return (p[0], p[1], "seek")
+            return self.item_goal(p, "seek")
         ep = self.explore_pt
         if ep is None or math.hypot(ep[0] - x, ep[1] - y) < 12 or t - self.explore_t > 25 or \
                 not self.in_circle(ep[0], ep[1], zcx, zcy, zr, 40):
