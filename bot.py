@@ -83,7 +83,7 @@ if LIGHTNING_BRAWL:
 # artillery: carry a mortar, lob it at tracked mechs 35-225 m away, high arc over buildings at hidden ones
 MORTAR_MODE = False      # v17 experiment; off here so v18 measures anti-focus alone
 ANTI_FOCUS = False       # 2+ mechs aiming at / hitting us: break line of sight with all of them for ~6 s
-DANGER_MAP = False       # early on, farm / explore away from where we hear fighting
+DANGER_MAP = True        # early on, farm / explore away from where we hear fighting
 DANGER_UNTIL = 90.0      # ... during the first seconds (the opening is the bloodiest part)
 DANGER_TAU = 20.0        # seconds for a heard fight to fade
 DANGER_CELL = 20.0
@@ -104,7 +104,6 @@ SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, 
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
 ANTI_LASER_ARC = True    # with lightning: a laser carrier charging within 44 m is the top target (short)
-FINE_LOS = True          # use the 1 m line-of-sight layer in nav.bin (2 m raster blocked ~5% of real laser hits)
 UPPER_AIM = True         # real hits: 57% of shots our LOS called blocked had the target's upper body clear
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
@@ -149,21 +148,6 @@ class Nav:
         self.otop.frombytes(raw[o:o + 2 * n])
         o += 2 * n
         self.canopy = raw[o:o + n] if len(raw) >= o + n else bytes(n)
-        o += n
-        # fine 1 m line-of-sight layer (optional)
-        self.l_top = None
-        lh = h.get("los")
-        if lh and FINE_LOS:
-            ln = lh["nx"] * lh["ny"]
-            if len(raw) >= o + 6 * ln:
-                self.l_nx, self.l_ny = lh["nx"], lh["ny"]
-                self.l_minx, self.l_miny, self.l_inv = lh["minX"], lh["minY"], 1.0 / lh["cell"]
-                self.l_top = array.array("h"); self.l_top.frombytes(raw[o:o + 2 * ln]); o += 2 * ln
-                self.l_base = array.array("h"); self.l_base.frombytes(raw[o:o + 2 * ln]); o += 2 * ln
-                self.l_surf = array.array("h"); self.l_surf.frombytes(raw[o:o + 2 * ln]); o += 2 * ln
-                if sys.byteorder != "little":
-                    for a_ in (self.l_top, self.l_base, self.l_surf):
-                        a_.byteswap()
         if sys.byteorder != "little":
             for a in (self.top, self.base, self.surf, self.otop):
                 a.byteswap()
@@ -241,8 +225,6 @@ class Nav:
         d = math.sqrt(dx * dx + dy * dy + dz * dz)
         if d < 3.0:
             return True
-        if self.l_top is not None:
-            return self._los_fine(a, dx, dy, dz, d, skip_end)
         step = 1.5
         n = int(d / step)
         top, base, surf = self.top, self.base, self.surf
@@ -253,33 +235,6 @@ class Nav:
         # walk in grid units; z in decimeters
         gx = (a[0] - self.minx) * inv
         gy = (a[1] - self.miny) * inv
-        gz = a[2] * 10.0
-        sx, sy, sz = dx * inv / n, dy * inv / n, dz * 10.0 / n
-        nxm, nym = nx - 1, ny - 1
-        for k in range(1, kend + 1):
-            i = int(gx + sx * k)
-            j = int(gy + sy * k)
-            if i < 0 or j < 0 or i > nxm or j > nym:
-                continue
-            c = j * nx + i
-            zz = gz + sz * k
-            t = top[c]
-            if t != UNSET and base[c] - 5 <= zz <= t:
-                return False
-            if surf[c] > zz + 3:
-                return False
-        return True
-
-    def _los_fine(self, a, dx, dy, dz, d, skip_end):
-        step = 0.75
-        n = int(d / step)
-        kend = n - int(skip_end / step)
-        if kend < 1:
-            return True
-        top, base, surf = self.l_top, self.l_base, self.l_surf
-        inv, nx, ny = self.l_inv, self.l_nx, self.l_ny
-        gx = (a[0] - self.l_minx) * inv
-        gy = (a[1] - self.l_miny) * inv
         gz = a[2] * 10.0
         sx, sy, sz = dx * inv / n, dy * inv / n, dz * 10.0 / n
         nxm, nym = nx - 1, ny - 1
@@ -429,7 +384,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v30"
+    name = "survivor-v31"
 
     def __init__(self, hello):
         cfg = hello["config"]
