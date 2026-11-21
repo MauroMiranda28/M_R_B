@@ -37,7 +37,10 @@ FARM_NPC_R, FARM_CRATE_R, FARM_CRATE_T, FARM_HP = 75.0, 55.0, 260.0, 0.6
 DODGE_SHELLS = True      # run out of the splash of incoming mortar shells
 BULLET_ALERT = True      # turn toward bullets flying at us before they land
 FARM_ROAM = True         # actively hunt crates and drones for cubes early on
-FARM_UNTIL = 230.0       # ... until this match time
+FARM_UNTIL = 300.0       # ... until this match time
+FARM_RANGE = 260.0       # how far we walk to a remembered crate / drone
+DROP_RANGE = 260.0       # how far we go for a supply drop (3 cubes + full HP/energy)
+CUBE_RANGE = 150.0       # how far we walk to a seen / remembered cube
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -309,7 +312,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v7"
+    name = "survivor-v8"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -349,6 +352,7 @@ class Bot:
         self.hide_xy = None
         self.known_crates = {}
         self.known_npcs = {}
+        self.known_cubes = {}
         self.explore_pt = None
         self.explore_t = -99.0
         self.jink = 0.0
@@ -1213,16 +1217,22 @@ class Bot:
             p = dr["pos"]
             d = math.hypot(p[0] - x, p[1] - y)
             holder = dr.get("holder")
-            if holder is not None and holder != self.me:
+            if holder is not None and holder != self.me and hpf < 0.65:
                 continue
-            if d > 170 or not self.in_circle(p[0], p[1], zcx, zcy, zr, 10):
+            if d > DROP_RANGE or not self.in_circle(p[0], p[1], zcx, zcy, zr, 10):
                 continue
             if dr.get("lands_in", 0) > d / 11.0 + 6:
                 continue
             danger = False
+            nnear = 0
             for m in obs.get("mechs", []):
                 if m["kind"] == "mech" and math.hypot(m["pos"][0] - p[0], m["pos"][1] - p[1]) < 60:
-                    danger = True
+                    nnear += 1
+                    mf_ = (m.get("hp", 1400) or 1) / max(1.0, m.get("max_hp", 1400) or 1400)
+                    if mf_ > hpf * 0.9:
+                        danger = True
+            if nnear >= 2:
+                danger = True
             if not danger:
                 return (p[0], p[1], "drop")
         # weapon
@@ -1243,14 +1253,20 @@ class Bot:
                     best = (s, p)
             if best:
                 return (best[1][0], best[1][1], "loot")
-        # cubes
+        # cubes (seen now or remembered)
         best = None
-        for c in obs.get("cubes", []):
+        cubes_all = list(obs.get("cubes", []))
+        if FARM_ROAM:
+            seen_ids = {c["id"] for c in cubes_all}
+            cubes_all += [{"id": k, "pos": v} for k, v in self.known_cubes.items() if k not in seen_ids]
+        for c in cubes_all:
             p = c["pos"]
             if not self.reachable_item(p) or not self.in_circle(p[0], p[1], zcx, zcy, zr, 10):
                 continue
+            if math.hypot(p[0] - x, p[1] - y) > CUBE_RANGE:
+                continue
             d = math.hypot(p[0] - x, p[1] - y)
-            if d < 80 and (best is None or d < best[0]):
+            if best is None or d < best[0]:
                 best = (d, p)
         if best:
             return (best[1][0], best[1][1], "cube")
@@ -1278,6 +1294,18 @@ class Bot:
         for m in obs.get("mechs", []):
             if m.get("kind") == "npc":
                 self.known_npcs[m["id"]] = (m["pos"], t)
+        kq = self.known_cubes
+        cseen = set()
+        for c in obs.get("cubes", []):
+            kq[c["id"]] = c["pos"]
+            cseen.add(c["id"])
+        for cid in list(kq.keys()):
+            if cid in cseen:
+                continue
+            p = kq[cid]
+            dd = math.hypot(p[0] - x, p[1] - y)
+            if dd < 3.0 or (dd < 35 and self.nav.los(eye, (p[0], p[1], p[2] + 0.5), 1.0)):
+                del kq[cid]  # picked up (by us or someone else)
         # forget crates that should be visible but aren't (destroyed)
         for cid in list(kc.keys()):
             if cid in seen:
@@ -1301,13 +1329,13 @@ class Bot:
             if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25) or p[2] - nav.ground(p[0], p[1]) > 2.5:
                 continue
             d = math.hypot(p[0] - x, p[1] - y)
-            if d < 200 and (best is None or d < best[0]):
+            if d < FARM_RANGE and (best is None or d < best[0]):
                 best = (d, p, cid, "crate")
         for nid, (p, ts) in self.known_npcs.items():
             if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25):
                 continue
             d = math.hypot(p[0] - x, p[1] - y) - 25.0  # 2 cubes: worth a detour
-            if d < 200 and (best is None or d < best[0]):
+            if d < FARM_RANGE and (best is None or d < best[0]):
                 best = (d, p, nid, "npc")
         if best is not None:
             p = best[1]
