@@ -98,6 +98,12 @@ ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when at
 #   "idle":   never fights, never loots, follows the zone, otherwise stands still
 #   "runner": never fights, follows the zone, keeps moving away from every mech it sees or fight it hears
 PROBE = None
+# ---- v24: battle-royale rules (edge ground, silence third-party, fight filter, hysteresis)
+EDGE_BAND = True         # live in the 60-85% band of the next circle, on the side the circle moves toward
+SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
+FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
+RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
+ANTI_LASER_ARC = True    # with lightning: a laser carrier charging within 44 m is the top target (short)
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
 LASERLESS_EVADE = False  # no laser of our own: break sight with laser carriers beyond 50 m instead of trading
@@ -377,7 +383,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v23"
+    name = "survivor-v24"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -435,6 +441,10 @@ class Bot:
         self.focus_hide_until = -99.0
         self.danger = {}
         self.next_hop = 3.0
+        self.corridor = False
+        self.strike = None
+        self.cooldown_spots = []
+        self.retreating = False
         self.peek_xy = None
         self.known_pickups = {}
         self.peek_until = -99.0
@@ -467,8 +477,40 @@ class Bot:
     def in_circle(self, x, y, cx, cy, r, margin=0.0):
         return math.hypot(x - cx, y - cy) <= r - margin
 
+    def band_spot(self, z, x, y):
+        """Rules 1+4: a spot in the 60-85% band of the next circle. If the circle is moving away from us
+        (we are on the 'corridor' side everybody crosses), rotate early toward the side it moves to."""
+        nc, R, c = z["next_center"], z["next_radius"], z["center"]
+        self.corridor = False
+        if R < 40:
+            return None
+        outer = R - max(15.0, 0.15 * R)
+        inner = 0.6 * R
+        dx, dy = x - nc[0], y - nc[1]
+        d = math.hypot(dx, dy)
+        sx, sy = nc[0] - c[0], nc[1] - c[1]
+        sl = math.hypot(sx, sy)
+        if d < 1e-6:
+            ux, uy = (sx / sl, sy / sl) if sl > 1e-6 else (1.0, 0.0)
+        else:
+            ux, uy = dx / d, dy / d
+        inherited = sl < 5.0 or (ux * sx + uy * sy) / sl > -0.2
+        if inner <= d <= outer and inherited:
+            return (x, y), True
+        ang = math.atan2(uy, ux)
+        if not inherited:
+            self.corridor = True
+            diff = wrap(math.atan2(sy, sx) - ang)
+            ang += math.copysign(min(abs(diff), 1.05), diff)  # swing up to 60 deg toward inherited ground
+        r = outer if d > outer else (0.5 * (inner + outer) if d < inner else d)
+        return (nc[0] + math.cos(ang) * r, nc[1] + math.sin(ang) * r), False
+
     def safe_spot(self, z, x, y):
         """Where we want to stand: inside the next circle, on our side of it."""
+        if EDGE_BAND:
+            b = self.band_spot(z, x, y)
+            if b is not None:
+                return b
         nc = z["next_center"]
         R = z["next_radius"]
         if ZONE_EDGE:
@@ -986,6 +1028,7 @@ class Bot:
         time_to_shrink = zone["shrink_start"] - t
         travel = dist_spot / max(1.0, stats.get("walk_speed", 11.7))
         zone_urgent = (not in_zone) or (not at_spot and (time_to_shrink < travel + 12 or zone["dps"] >= 60)) \
+            or (EDGE_BAND and self.corridor and not at_spot and self.camp is None) \
             or (not self.in_circle(x, y, zcx, zcy, zr, 10.0 if ZONE_EDGE else 15.0))
 
         # ---------- perception
@@ -1043,10 +1086,19 @@ class Bot:
                 or (self.last_target == h["m"]["id"] and t - self.last_target_t < 3)
             if self.on_roof and not h["attacked"] and d > ROOF_ENGAGE:
                 engage = False
+            if FIGHT_FILTER and engage and not h["attacked"] and not h["aiming"] and d >= 45:
+                m_ = h["m"]
+                their_p = h["hpf"] * (1.0 + 0.04 * min(m_.get("cubes", 0) or 0, 10))
+                mine_p = hpf * (1.0 + 0.04 * min(me.get("cubes", 0), 10))
+                quick = h["hpf"] < 0.6 or mine_p > their_p * 1.25        # time: it ends fast
+                loot = (m_.get("cubes", 0) or 0) >= 3                      # HP: its cubes heal us
+                pos_ = math.hypot(m_["pos"][0] - spot[0], m_["pos"][1] - spot[1]) < 45  # position: it sits on our spot
+                if not (quick or loot or pos_ or (self.last_target == m_["id"] and t - self.last_target_t < 3)):
+                    engage = False
             capturing = DROP_AMBUSH and h["m"]["id"] in drop_holders and d < 170 and hpf > 0.4
             if capturing:
                 engage = True
-            if VULTURE and t < self.vulture_until and h["hpf"] < 0.65 and d < 170 and hpf > 0.45:
+            if VULTURE and t < self.vulture_until and h["hpf"] < (0.85 if self.strike else 0.65) and d < 170 and hpf > 0.45:
                 engage = True
             if PACIFIST:
                 engage = d < 40 or (h["attacked"] and (d < 75 or h["hpf"] < 0.3)) or \
@@ -1056,6 +1108,8 @@ class Bot:
             s = d * (0.5 + h["hpf"]) - (150 if h["attacked"] else 0) - (60 if h["aiming"] else 0)
             if COOKOFF_FOCUS and laser and "mortar" in (h["m"].get("weapons") or []):
                 s -= 50
+            if ANTI_LASER_ARC and light and d < 44 and h["m"].get("charging") and "laser" in (h["m"].get("weapons") or []):
+                s -= 250
             if capturing:
                 s -= 120
             if self.last_target == h["m"]["id"]:
@@ -1124,6 +1178,9 @@ class Bot:
             their_power = target["hpf"] * (1.0 + 0.04 * min(m.get("cubes", 0) or 0, 10))
             retreat = (hpf < 0.35 and their_power > my_power * 0.7) or nthreat >= 3 or \
                 (nthreat >= 2 and hpf < 0.6)
+            if RETREAT_HYST:
+                retreat = retreat or (self.retreating and hpf < 0.6 and d < 80)
+                self.retreating = retreat
             if light and not retreat and (LIGHTNING_BRAWL or my_power > their_power * 1.1):
                 pref = 28.0 if LIGHTNING_BRAWL else 26.0
             elif laser or gun:
@@ -1831,7 +1888,7 @@ class Bot:
                 self.death_sites.append((ts, px, py))
             elif k in FIGHT_SOUNDS and snd.get("dist") in ("near", "mid"):
                 self.fight_snd.append((ts, px, py, snd.get("dist")))
-        self.fight_snd = [f for f in self.fight_snd if t - f[0] < 6.0][-40:]
+        self.fight_snd = [f for f in self.fight_snd if t - f[0] < 12.0][-60:]
         self.death_sites = [d for d in self.death_sites if t - d[0] < 25.0][-8:]
 
     def vulture_goal(self, x, y, zcx, zcy, zr):
@@ -1848,6 +1905,33 @@ class Bot:
             else:
                 self.vulture_until = t + 6.0
                 return (best[1], best[2], "loot-death")
+        if SILENCE_STRIKE:
+            # strike while it is quiet: 5-10 s after a fight with 3+ sounds stops, the survivor is weak
+            if self.strike is not None:
+                sx_, sy_, st_ = self.strike
+                if t - st_ < 10.0 and math.hypot(sx_ - x, sy_ - y) > 12:
+                    self.vulture_until = t + 4.0
+                    return (sx_, sy_, "vulture-strike")
+                self.cooldown_spots.append((t + 30.0, sx_, sy_))  # 30 s rule: leave before a fourth party
+                self.strike = None
+            self.cooldown_spots = [c_ for c_ in self.cooldown_spots if c_[0] > t]
+            win = [f for f in self.fight_snd if t - f[0] < 10.0]
+            if len(win) >= 3:
+                last = max(f[0] for f in win)
+                fx = sum(f[1] for f in win) / len(win)
+                fy = sum(f[2] for f in win) / len(win)
+                cool = any(math.hypot(c_[1] - fx, c_[2] - fy) < 60 for c_ in self.cooldown_spots)
+                if not cool and self.in_circle(fx, fy, zcx, zcy, zr, 20):
+                    if t - last > 1.5:   # silence: go in now
+                        self.strike = (fx, fy, t)
+                        self.vulture_until = t + 10.0
+                        return (fx, fy, "vulture-strike")
+                    d = math.hypot(fx - x, fy - y)
+                    if d > 80:          # still loud: hold ~70 m out
+                        ux, uy = (fx - x) / d, (fy - y) / d
+                        return (fx - ux * 70.0, fy - uy * 70.0, "vulture")
+                    return (x, y, "vulture")
+            return None
         # an ongoing fight: close in to a standoff distance and wait for a weakened survivor
         recent = [f for f in self.fight_snd if t - f[0] < 4.0]
         if len(recent) < 2:
