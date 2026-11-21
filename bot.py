@@ -83,7 +83,7 @@ if LIGHTNING_BRAWL:
 # artillery: carry a mortar, lob it at tracked mechs 35-225 m away, high arc over buildings at hidden ones
 MORTAR_MODE = False      # v17 experiment; off here so v18 measures anti-focus alone
 ANTI_FOCUS = False       # 2+ mechs aiming at / hitting us: break line of sight with all of them for ~6 s
-DANGER_MAP = True        # early on, farm / explore away from where we hear fighting
+DANGER_MAP = False       # early on, farm / explore away from where we hear fighting
 DANGER_UNTIL = 90.0      # ... during the first seconds (the opening is the bloodiest part)
 DANGER_TAU = 20.0        # seconds for a heard fight to fade
 DANGER_CELL = 20.0
@@ -104,6 +104,9 @@ SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, 
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
 ANTI_LASER_ARC = True    # with lightning: a laser carrier charging within 44 m is the top target (short)
+# scout lobbies: house bots shoot their NEAREST mech 87% of the time -> never be anyone's nearest
+NOT_NEAREST = True
+HUNT_RANGE = 220.0       # a mech this close that has nobody nearer than us is hunting us
 UPPER_AIM = True         # real hits: 57% of shots our LOS called blocked had the target's upper body clear
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
@@ -384,7 +387,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v31"
+    name = "survivor-v32"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -439,6 +442,7 @@ class Bot:
         self.goal_roof = False
         self.path_roof = False
         self.endgame = False
+        self.hunted = False
         self.focus_hide_until = -99.0
         self.danger = {}
         self.next_hop = 3.0
@@ -1125,6 +1129,17 @@ class Bot:
             self.last_target_t = t
 
         threats = [h for h in hostile if h["d"] < 150 and (h["attacked"] or h["aiming"] or h["d"] < 90)]
+        hunters = []
+        if NOT_NEAREST:
+            mechs_known = [h["m"] for h in hostile]
+            for h in hostile:
+                if h["d"] > HUNT_RANGE:
+                    continue
+                mx_, my_ = h["m"]["pos"][0], h["m"]["pos"][1]
+                other = min((math.hypot(o["pos"][0] - mx_, o["pos"][1] - my_) for o in mechs_known if o is not h["m"]),
+                            default=1e9)
+                if h["d"] < other:
+                    hunters.append(h)
         # who is focusing us: visible and aiming at us, or hit us in the last 5 s (mechs only)
         focus_ids = {h["m"]["id"] for h in hostile if h["vis"] and h["aiming"] and h["d"] < 200}
         focus_ids |= {a for a, v in self.attackers.items() if t - v[0] < 5.0 and a is not None and a < 100}
@@ -1141,7 +1156,7 @@ class Bot:
             self.remember_farm(obs, x, y, (x, y, eye), t)
 
         # farm npc/crates when calm
-        calm = not threats and not zone_urgent and t - self.threat_t > 4
+        calm = not threats and not zone_urgent and t - self.threat_t > 4 and not hunters
         farm = None
         if target is None and calm and hpf > max(0.5, REGEN_FIRST) and not PACIFIST:
             for d, m in npcs:
@@ -1353,6 +1368,37 @@ class Bot:
                 boost = energy > 5
                 state = "dodge"
 
+        # not the nearest: slide away from whoever has us as their nearest mech (keep shooting them)
+        self.hunted = False
+        if NOT_NEAREST and hunters and not zone_urgent:
+            near_h = min(hunters, key=lambda h: h["d"])
+            finish = near_h["hpf"] < 0.4 and hpf > 0.5
+            if near_h["d"] > 40 and not finish:
+                self.hunted = True
+                ax = ay = 0.0
+                for h in hunters:
+                    p_ = h["m"]["pos"]
+                    dd = max(h["d"], 1.0)
+                    w_ = 1.0 / max(dd, 30.0)
+                    ax += (x - p_[0]) / dd * w_
+                    ay += (y - p_[1]) / dd * w_
+                al = math.hypot(ax, ay) or 1.0
+                ax, ay = ax / al, ay / al
+                gx, gy = x + ax * 40.0, y + ay * 40.0
+                if not self.in_circle(gx, gy, zcx, zcy, zr, 25.0):
+                    # turn the escape toward the zone centre so we never run out of it
+                    zx_, zy_ = zcx - x, zcy - y
+                    zl = math.hypot(zx_, zy_) or 1.0
+                    ax, ay = ax + zx_ / zl * 1.2, ay + zy_ / zl * 1.2
+                    al = math.hypot(ax, ay) or 1.0
+                    ax, ay = ax / al, ay / al
+                    gx, gy = x + ax * 40.0, y + ay * 40.0
+                ex, ey = self.nav_move(x, y, gx, gy, budget_end)
+                sx_, sy_ = -ey * self.strafe * 0.35, ex * self.strafe * 0.35
+                mvx, mvy = self.deflect(x, y, ex + sx_, ey + sy_)
+                boost = energy > 40 and near_h["d"] < 140
+                state = "evade"
+
         # laser dodge: someone charging at us
         jump = False
         for h in hostile:
@@ -1444,7 +1490,7 @@ class Bot:
         # walls / roofs in the way of a travel move: jump-jet over them
         climbing = False
         if state not in ("fight", "retreat", "dodge", "peek") and not jump:
-            cl = self.climb_ctl(x, y, z, mvx, mvy, me.get("grounded", True), energy, not in_zone)
+            cl = self.climb_ctl(x, y, z, mvx, mvy, me.get("grounded", True), energy, not in_zone or state == "evade")
             if cl is not None:
                 climbing = True
                 if cl == "jump":
@@ -1849,7 +1895,7 @@ class Bot:
             if d > want:
                 return self.item_goal(p, "farm")
             return (x, y, "farm")
-        if self.endgame:
+        if self.endgame or self.hunted:
             return None
         if VULTURE and hpf > VULTURE_HP and not (DANGER_MAP and t < DANGER_UNTIL):
             g = self.vulture_goal(x, y, zcx, zcy, zr)
