@@ -23,6 +23,11 @@ UPGRADE_PRIORITY = [
     "gun_velocity", "gun_mag", "jets", "sensors", "lightning_chain", "laser_pierce",
     "mortar_reload", "mortar_velocity", "mortar_splash",
 ]
+# see first, aim faster: +25 m vision, +15 m proximity, half the sound bearing error, +30% turn rate
+VISION_FIRST = True
+if VISION_FIRST:
+    UPGRADE_PRIORITY = ["sensors", "armor", "gyros", "plating"] + \
+        [u for u in UPGRADE_PRIORITY if u not in ("sensors", "armor", "gyros", "plating")]
 # survival-first: never start fights, hide from anyone we see, shoot only when cornered
 # v6 = the v1 style (best on the track so far) + projectile awareness.
 # Track scores: v1 3.54 (aggressive, farms) > v3 3.31 > v2 2.85 > v5 2.21 (pacifist, hides, edge, jink).
@@ -312,7 +317,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v8"
+    name = "survivor-v9"
 
     def __init__(self, hello):
         cfg = hello["config"]
