@@ -68,6 +68,11 @@ ENDGAME_ALIVE = 3        # with this few mechs left: no farming / vulture, start
 ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
     WANT_WEAPON = {"lightning": 3, "laser": 2}
+# artillery: carry a mortar, lob it at tracked mechs 35-225 m away, high arc over buildings at hidden ones
+MORTAR_MODE = True
+MORTAR_VISIBLE_MIN = 110.0  # lob at visible mechs only beyond this; hidden ones at any range 35-225 m
+if MORTAR_MODE:
+    WANT_WEAPON = {"lightning": 3, "mortar": 2.5, "laser": 2}
 
 
 def wrap(a):
@@ -339,7 +344,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v14"
+    name = "survivor-v17"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -538,6 +543,95 @@ class Bot:
         self.hide_t = t
         self.hide_xy = found
         return found
+
+    def arc_clear(self, ox, oy, oz, vx, vy, vz, g, T):
+        """Shell path from launch to ~90% of the flight time misses buildings and terrain."""
+        nav = self.nav
+        top, base, surf = nav.top, nav.base, nav.surf
+        n = 14
+        for k in range(1, n):
+            tt = T * 0.9 * k / n
+            px, py, pz = ox + vx * tt, oy + vy * tt, oz + vz * tt - 0.5 * g * tt * tt
+            c = nav.idx(px, py)
+            zz = pz * 10.0
+            tp = top[c]
+            if tp != UNSET and base[c] - 5 <= zz <= tp:
+                return False
+            if surf[c] > zz:
+                return False
+        return True
+
+    def solve_mortar(self, x, y, tube, p, vel, v, g, high_first):
+        """Yaw / pitch that lands a shell at the target's predicted feet, or None."""
+        tx, ty, tz = p[0], p[1], p[2] + 0.5
+        sol = None
+        T = 0.0
+        for _ in range(3):
+            qx, qy = tx + vel[0] * T, ty + vel[1] * T
+            dx, dy = qx - x, qy - y
+            D = math.hypot(dx, dy)
+            if D < 1.0:
+                return None
+            dz = tz - tube
+            disc = v ** 4 - g * (g * D * D + 2 * dz * v * v)
+            if disc < 0:
+                return None
+            yaw = math.atan2(dy, dx)
+            sol = None
+            for sign in ((1.0, -1.0) if high_first else (-1.0, 1.0)):
+                th = math.atan((v * v + sign * math.sqrt(disc)) / (g * D))
+                # the shell starts 3 m out along the aim: re-solve from that point
+                for _r in range(2):
+                    D2 = D - 3.0 * math.cos(th)
+                    dz2 = dz - 3.0 * math.sin(th)
+                    disc2 = v ** 4 - g * (g * D2 * D2 + 2 * dz2 * v * v)
+                    if disc2 < 0 or D2 < 1.0:
+                        break
+                    th = math.atan((v * v + sign * math.sqrt(disc2)) / (g * D2))
+                if th > 1.28 or th < -0.68:
+                    continue
+                ch, sh = math.cos(th), math.sin(th)
+                T_ = (D - 3.0 * ch) / (v * ch)
+                ox, oy, oz = x + math.cos(yaw) * ch * 3.0, y + math.sin(yaw) * ch * 3.0, tube + sh * 3.0
+                if not self.arc_clear(ox, oy, oz, math.cos(yaw) * ch * v, math.sin(yaw) * ch * v, sh * v, g, T_):
+                    continue
+                sol = (yaw, th, T_)
+                break
+            if sol is None:
+                return None
+            T = sol[2]
+        return sol
+
+    def mortar_plan(self, obs, me, x, y, z, slots, eye):
+        mt = slots.get("mortar")
+        if mt is None or (mt[1].get("cooldown", 1) or 0) > 0.05:
+            return None
+        st = mt[1].get("stats", {})
+        v = st.get("speed", 72.0)
+        g = st.get("gravity", 22.0)
+        tube = z + (me.get("stats", {}).get("height", 9.0)) + 0.5
+        cands = []
+        for m in obs.get("mechs", []):
+            if m.get("kind") != "mech" or m.get("id") == self.me:
+                continue
+            p = m["pos"]
+            d = math.hypot(p[0] - x, p[1] - y)
+            if d < 35 or d > 225:
+                continue
+            vis = self.nav.los((x, y, eye), (p[0], p[1], p[2] + 4.5))
+            if vis and d < MORTAR_VISIBLE_MIN:
+                continue  # in plain sight at mid range: the gun / lightning does better
+            hpf_ = (m.get("hp", 1400) or 1) / max(1.0, m.get("max_hp", 1400) or 1400)
+            sc = d - (70 if not vis else 0) - (40 if m.get("id") == self.last_target else 0) - (1 - hpf_) * 60
+            if abs(m.get("vel", [0, 0, 0])[2]) > 3:
+                sc += 80  # airborne: hard to predict
+            cands.append((sc, m, vis))
+        cands.sort(key=lambda c: c[0])
+        for sc, m, vis in cands[:3]:
+            sol = self.solve_mortar(x, y, tube, m["pos"], m.get("vel") or [0, 0, 0], v, g, not vis)
+            if sol is not None:
+                return (sol[0], sol[1], m)
+        return None
 
     def projectile_react(self, obs, x, y, z, vx, vy, t):
         """Returns a move vector away from a mortar landing near us, or None.
@@ -1239,6 +1333,19 @@ class Bot:
                     (gun[1].get("ammo", 12) or 0) < gun[1]["stats"].get("mag", 12) * 0.5 and \
                     t - self.last_target_t > 1.5:
                 act["reload"] = True
+        if MORTAR_MODE and slots.get("mortar") is not None:
+            close_arc = light is not None and target is not None and target["d"] < 40
+            mp = None if close_arc else self.mortar_plan(obs, me, x, y, z, slots, eye)
+            if mp is not None:
+                aim = [mp[0], mp[1]]
+                err = math.hypot(wrap(ayaw - mp[0]), apitch - mp[1])
+                fire0 = fire1 = False
+                if err < 0.03:
+                    if slots["mortar"][0] == 0:
+                        fire0 = True
+                    else:
+                        fire1 = True
+                state += "/mortar"
         act["aim"] = [round(wrap(aim[0]), 4), round(max(-0.69, min(1.29, aim[1])), 4)]
         if fire0 or fire1:
             act["fire"] = [fire0, fire1]
@@ -1362,12 +1469,17 @@ class Bot:
         have_empty = any(w is None for w in weapons)
         swap_light = LIGHTNING_BRAWL and not have_empty and "lightning" not in slots and \
             "laser" in slots and "gun" in slots
-        if have_empty or swap_light:
+        swap_kinds = set()
+        if swap_light:
+            swap_kinds.add("lightning")
+        if MORTAR_MODE and not have_empty and "gun" in slots and "mortar" in slots and "lightning" not in slots:
+            swap_kinds.add("lightning")
+        if have_empty or swap_kinds:
             best = None
             for pk in obs.get("pickups", []):
                 if pk["kind"] not in WANT_WEAPON or pk["kind"] in slots:
                     continue
-                if swap_light and pk["kind"] != "lightning":
+                if not have_empty and pk["kind"] not in swap_kinds:
                     continue
                 if self.bad_pickups.get(pk["id"], -1) > t:
                     continue
@@ -1563,6 +1675,8 @@ class Bot:
                     return (pk["id"], m[0])
                 # gun + laser and a lightning here: laser + lightning beats gun + laser
                 if LIGHTNING_BRAWL and k == "lightning" and "laser" in slots and slots.get("gun") is not None:
+                    return (pk["id"], slots["gun"][0])
+                if MORTAR_MODE and k == "lightning" and "mortar" in slots and slots.get("gun") is not None:
                     return (pk["id"], slots["gun"][0])
         return None
 
