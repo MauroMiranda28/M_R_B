@@ -51,6 +51,12 @@ VULTURE_HP = 0.6         # only when at least this healthy
 VULTURE_STANDOFF = 70.0  # stop this far from the estimated fight
 FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion")
 SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
+# v11 small-tweaks package
+GUN_MAX_RANGE = 150.0    # don't give our position away with low-odds long gun shots (unless they attack us)
+COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% cook-off)
+WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
+COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
+LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -322,7 +328,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v10"
+    name = "survivor-v11"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -366,6 +372,9 @@ class Bot:
         self.fight_snd = []
         self.death_sites = []
         self.vulture_until = -99.0
+        self.prog = []
+        self.detour = None
+        self.detour_until = -99.0
         self.explore_pt = None
         self.explore_t = -99.0
         self.jink = 0.0
@@ -676,7 +685,19 @@ class Bot:
         offer = obs.get("offer")
         if offer and offer.get("choices"):
             ids = [c["id"] for c in offer["choices"]]
-            best = min(range(len(ids)), key=lambda i: UPGRADE_PRIORITY.index(ids[i]) if ids[i] in UPGRADE_PRIORITY else 99)
+            prio = UPGRADE_PRIORITY
+            if WEAPON_UPGRADES:
+                held = {w["kind"] for w in (me.get("weapons") or []) if w}
+                wfirst = []
+                if "laser" in held:
+                    wfirst += ["laser_damage", "laser_charge"]
+                if "lightning" in held:
+                    wfirst += ["lightning_efficiency", "lightning_range"]
+                if "gun" in held and "laser" not in held:
+                    wfirst += ["gun_damage", "gun_rate"]
+                head = [u for u in prio[:4]]
+                prio = head + wfirst + [u for u in prio[4:] if u not in wfirst]
+            best = min(range(len(ids)), key=lambda i: prio.index(ids[i]) if ids[i] in prio else 99)
             act["pick"] = best
 
         # ---------- weapons
@@ -759,6 +780,8 @@ class Bot:
             if not engage:
                 continue
             s = d * (0.5 + h["hpf"]) - (150 if h["attacked"] else 0) - (60 if h["aiming"] else 0)
+            if COOKOFF_FOCUS and laser and "mortar" in (h["m"].get("weapons") or []):
+                s -= 50
             if self.last_target == h["m"]["id"]:
                 s -= 40
             if s < best_s:
@@ -871,7 +894,7 @@ class Bot:
                     zd = math.hypot(zx, zy) or 1.0
                     mvx, mvy = mvx * 0.3 + zx / zd, mvy * 0.3 + zy / zd
             mvx, mvy = self.deflect(x, y, mvx, mvy)
-            boost = energy > (45 if light else 25)
+            boost = energy > max(COMBAT_ENERGY_KEEP, 45 if light else 25)
         else:
             # unseen attacker: hide from where the shots came from
             if not zone_urgent and hpf < UNSEEN_HIDE_HP and t - self.threat_t < 2.0 and self.threat_bearing is not None \
@@ -1010,6 +1033,40 @@ class Bot:
                     state += "/charge"
                 state += "/climb"
 
+        # long-term stuck: barely moved in 8 s while trying to travel
+        if LONG_STUCK:
+            if not self.prog or t - self.prog[-1][0] >= 1.0:
+                self.prog.append((t, x, y))
+                self.prog = self.prog[-9:]
+            travel = state.split("/")[0] in ("spot", "zone", "loot", "cube", "seek", "explore", "vulture",
+                                             "loot-death", "farm", "drop")
+            near_goal = goal is not None and math.hypot(goal[0] - x, goal[1] - y) < 25.0
+            if travel and not near_goal and len(self.prog) >= 9 and t > self.detour_until + 4 and \
+                    math.hypot(x - self.prog[0][1], y - self.prog[0][2]) < 5.0 and math.hypot(mvx, mvy) > 0.3:
+                self.path = None
+                self.plan.active = False
+                self.explore_pt = None
+                if goal is not None:
+                    for cid in [k for k, v in self.known_crates.items() if math.hypot(v[0][0] - goal[0], v[0][1] - goal[1]) < 3]:
+                        del self.known_crates[cid]
+                    for cid in [k for k, v in self.known_cubes.items() if math.hypot(v[0] - goal[0], v[1] - goal[1]) < 3]:
+                        del self.known_cubes[cid]
+                for _ in range(12):
+                    a = self.rng.uniform(-math.pi, math.pi)
+                    px, py = x + 25 * math.cos(a), y + 25 * math.sin(a)
+                    if nav.free(px, py) and nav.walk_clear(x, y, px, py) and \
+                            self.in_circle(px, py, zcx, zcy, zr, 8.0):
+                        self.detour = (px, py)
+                        self.detour_until = t + 3.0
+                        break
+                self.prog = []
+            if t < self.detour_until and self.detour is not None and state not in ("fight", "retreat", "dodge"):
+                dx_, dy_ = self.detour[0] - x, self.detour[1] - y
+                dd = math.hypot(dx_, dy_)
+                if dd > 2:
+                    mvx, mvy = dx_ / dd, dy_ / dd
+                    state += "/detour"
+
         # stuck handling
         moving = math.hypot(mvx, mvy) > 0.3
         self.hist.append((t, x, y))
@@ -1084,7 +1141,8 @@ class Bot:
             # gun
             if gun and clear:
                 gw = gun[1]
-                if gw.get("reload", 0) <= 0 and (gw.get("ammo", 1) or 0) > 0 and \
+                long_ok = d3 < GUN_MAX_RANGE or kind != "mech" or (target is not None and target["attacked"])
+                if gw.get("reload", 0) <= 0 and (gw.get("ammo", 1) or 0) > 0 and long_ok and \
                         d3 < gw["stats"].get("range", 230) and gw.get("cooldown", 0) <= 0.1:
                     gyaw, gpitch, gdist = self.aim_to(x, y, muzzle, lead_q)
                     gmiss = gdist * math.hypot(wrap(ayaw - gyaw), apitch - gpitch)
