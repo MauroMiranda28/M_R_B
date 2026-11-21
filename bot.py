@@ -69,7 +69,9 @@ ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
     WANT_WEAPON = {"lightning": 3, "laser": 2}
 # artillery: carry a mortar, lob it at tracked mechs 35-225 m away, high arc over buildings at hidden ones
-MORTAR_MODE = True
+MORTAR_MODE = False      # v17 experiment; off here so v18 measures anti-focus alone
+ANTI_FOCUS = True        # 2+ mechs aiming at / hitting us: break line of sight with all of them for ~6 s
+ANTI_FOCUS_HOLD = 6.0    # just over their 5 s tracking memory
 MORTAR_VISIBLE_MIN = 110.0  # lob at visible mechs only beyond this; hidden ones at any range 35-225 m
 if MORTAR_MODE:
     WANT_WEAPON = {"lightning": 3, "mortar": 2.5, "laser": 2}
@@ -344,7 +346,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v17"
+    name = "survivor-v18"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -391,6 +393,7 @@ class Bot:
         self.goal_roof = False
         self.path_roof = False
         self.endgame = False
+        self.focus_hide_until = -99.0
         self.prog = []
         self.detour = None
         self.detour_until = -99.0
@@ -908,6 +911,12 @@ class Bot:
             self.last_target_t = t
 
         threats = [h for h in hostile if h["d"] < 150 and (h["attacked"] or h["aiming"] or h["d"] < 90)]
+        # who is focusing us: visible and aiming at us, or hit us in the last 5 s (mechs only)
+        focus_ids = {h["m"]["id"] for h in hostile if h["vis"] and h["aiming"] and h["d"] < 200}
+        focus_ids |= {a for a, v in self.attackers.items() if t - v[0] < 5.0 and a is not None and a < 100}
+        focus_eyes = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0)
+                      for h in hostile if h["m"]["id"] in focus_ids][:4]
+        focused = ANTI_FOCUS and len(focus_ids) >= 2 and len(focus_eyes) >= 1
 
         # listen for fights and deaths (vulture)
         if VULTURE:
@@ -981,6 +990,10 @@ class Bot:
                 if target not in threats:
                     eyes.append((p[0], p[1], p[2] + 8.0))
                 hide_xy = self.hide_spot(x, y, eyes, (zcx, zcy, zr), t)
+            if focused and hide_xy is None and not zone_urgent:
+                hide_xy = self.hide_spot(x, y, focus_eyes, (zcx, zcy, zr), t)
+                if hide_xy is not None:
+                    self.focus_hide_until = t + ANTI_FOCUS_HOLD
             if retreat and hide_xy is None:
                 radial = -1.0
                 state = "retreat"
@@ -1037,8 +1050,11 @@ class Bot:
                     if hs is not None:
                         self.hide_until = max(self.hide_until, t + 4.0)
             hiding = (not zone_urgent and self.hide_xy is not None and t < self.hide_until)
-            if hiding and hpf < 0.9 and t - self.threat_t < 25:
+            if FIGHT_HIDE and hiding and hpf < 0.9 and t - self.threat_t < 25:
                 self.hide_until = max(self.hide_until, t + 0.5)  # stay put while regenerating
+            if ANTI_FOCUS and not zone_urgent and self.hide_xy is not None and t < self.focus_hide_until:
+                hiding = True  # keep out of their sight until their tracking runs out
+                self.hide_until = max(self.hide_until, self.focus_hide_until)
             if zone_urgent:
                 goal = spot
                 state = "zone"
