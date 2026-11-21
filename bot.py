@@ -55,11 +55,19 @@ SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 GUN_MAX_RANGE = 150.0    # don't give our position away with low-odds long gun shots (unless they attack us)
 COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% cook-off)
 WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
+# duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
+STRAFE_MIN, STRAFE_MAX = 0.25, 0.5  # seconds between direction changes
+STRAFE_FLIP_P = 1.0                 # chance a change actually reverses direction
+STRAFE_W = 1.6                      # sideways weight vs the range-keeping component
+FIGHT_BOOST_E = 70.0
+REGEN_FIRST = 0.9                   # don't shoot crates / drones below this HP: dealing damage blocks regen
+LEAD_K = 1.0                        # fraction of the computed gun lead we apply
+GUN_FIGHT_RANGE = 100.0             # preferred distance with gun / laser                # boost while fighting above this energy
 COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
 LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 # lightning counters the built-ins' lasers (short) and auto-aims: prefer it, fight close, rush chargers
-LIGHTNING_BRAWL = True
+LIGHTNING_BRAWL = False  # duels: rushing to 28 m loses (84:60 vs 100:40 without)
 # a quarter of crates / loot sit on roofs, uncontested: jet up to roofs this low (m above the street)
 ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
@@ -71,7 +79,7 @@ if LIGHTNING_BRAWL:
 # artillery: carry a mortar, lob it at tracked mechs 35-225 m away, high arc over buildings at hidden ones
 MORTAR_MODE = False      # v17 experiment; off here so v18 measures anti-focus alone
 ANTI_FOCUS = False       # 2+ mechs aiming at / hitting us: break line of sight with all of them for ~6 s
-DANGER_MAP = True        # early on, farm / explore away from where we hear fighting
+DANGER_MAP = False       # early on, farm / explore away from where we hear fighting
 DANGER_UNTIL = 90.0      # ... during the first seconds (the opening is the bloodiest part)
 DANGER_TAU = 20.0        # seconds for a heard fight to fade
 DANGER_CELL = 20.0
@@ -350,7 +358,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v19"
+    name = "survivor-v20"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -934,7 +942,7 @@ class Bot:
         # farm npc/crates when calm
         calm = not threats and not zone_urgent and t - self.threat_t > 4
         farm = None
-        if target is None and calm and hpf > 0.5 and not PACIFIST:
+        if target is None and calm and hpf > max(0.5, REGEN_FIRST) and not PACIFIST:
             for d, m in npcs:
                 if d < FARM_NPC_R and nav.los((x, y, eye), center_of(m)):
                     farm = ("npc", m)
@@ -976,7 +984,7 @@ class Bot:
             if light and not retreat and (LIGHTNING_BRAWL or my_power > their_power * 1.1):
                 pref = 28.0 if LIGHTNING_BRAWL else 26.0
             elif laser or gun:
-                pref = 75.0
+                pref = GUN_FIGHT_RANGE
             else:
                 pref = 60.0
             # trade shots in the open only when clearly winning; otherwise break line of sight and heal
@@ -1006,10 +1014,10 @@ class Bot:
                 radial = max(-1.0, min(1.0, (d - pref) / 25.0))
                 state = "fight"
             if t > self.strafe_t:
-                self.strafe = -self.strafe if self.rng.random() < 0.7 else self.strafe
-                self.strafe_t = t + self.rng.uniform(0.6, 1.5)
+                self.strafe = -self.strafe if self.rng.random() < STRAFE_FLIP_P else self.strafe
+                self.strafe_t = t + self.rng.uniform(STRAFE_MIN, STRAFE_MAX)
             sx, sy = -uy * self.strafe, ux * self.strafe
-            strafe_w = 0.55 if retreat else 0.9
+            strafe_w = 0.55 if retreat else STRAFE_W
             mvx = ux * radial + sx * strafe_w
             mvy = uy * radial + sy * strafe_w
             if hide_xy is not None:
@@ -1030,7 +1038,7 @@ class Bot:
                     zd = math.hypot(zx, zy) or 1.0
                     mvx, mvy = mvx * 0.3 + zx / zd, mvy * 0.3 + zy / zd
             mvx, mvy = self.deflect(x, y, mvx, mvy)
-            boost = energy > max(COMBAT_ENERGY_KEEP, 45 if light else 25)
+            boost = energy > max(FIGHT_BOOST_E, 45 if light else 25)
             if LIGHTNING_BRAWL and light and not retreat and state == "fight":
                 if m.get("charging") and d < 90:
                     # their laser is charging: close in, the arc shorts it out
@@ -1272,6 +1280,9 @@ class Bot:
             hitscan_q = (c[0] + v[0] * 0.1, c[1] + v[1] * 0.1, c[2] + v[2] * 0.1)
             gspeed = gun[1]["stats"].get("speed", 252) if gun else 252
             lead_q = self.lead(x, y, muzzle, c, v, gspeed, airborne)
+            if LEAD_K != 1.0:
+                lead_q = (c[0] + (lead_q[0] - c[0]) * LEAD_K, c[1] + (lead_q[1] - c[1]) * LEAD_K,
+                          c[2] + (lead_q[2] - c[2]) * LEAD_K)
             use_hitscan = laser and laser_charge >= full * 0.8
             if light and d3 < light[1]["stats"].get("range", 45) * 0.95:
                 use_hitscan = True
