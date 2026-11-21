@@ -32,7 +32,7 @@ if VISION_FIRST:
 # v6 = the v1 style (best on the track so far) + projectile awareness.
 # Track scores: v1 3.54 (aggressive, farms) > v3 3.31 > v2 2.85 > v5 2.21 (pacifist, hides, edge, jink).
 PACIFIST = False
-AGGRO_RANGE = 120.0      # engage non-hostile mechs closer than this
+AGGRO_RANGE = 160.0      # engage non-hostile mechs closer than this
 UNSEEN_HIDE_HP = 0.0     # hide from an attacker we can't see below this HP fraction
 SPAWN_COVER_T = 0.0      # seconds after spawn spent getting into cover before looting
 JINK = False             # erratic sidesteps all the time, not only when hit
@@ -41,7 +41,6 @@ FIGHT_HIDE = False       # break line of sight mid-fight when losing
 FARM_NPC_R, FARM_CRATE_R, FARM_CRATE_T, FARM_HP = 75.0, 55.0, 260.0, 0.6
 DODGE_SHELLS = True      # run out of the splash of incoming mortar shells
 BULLET_ALERT = True      # turn toward bullets flying at us before they land
-CALM_STILL = True        # scout data: top-3 bots stand still 40% of calm time (bottom: 16%); no blind exploring
 FARM_ROAM = True         # actively hunt crates and drones for cubes early on
 FARM_UNTIL = 300.0       # ... until this match time
 FARM_RANGE = 260.0       # how far we walk to a remembered crate / drone
@@ -53,22 +52,20 @@ VULTURE_STANDOFF = 45.0  # stop this far from the estimated fight
 FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion")
 SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 # v11 small-tweaks package
-GUN_MAX_RANGE = 120.0    # don't give our position away with low-odds long gun shots (unless they attack us)
+GUN_MAX_RANGE = 150.0    # don't give our position away with low-odds long gun shots (unless they attack us)
 COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% cook-off)
 WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
 # duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
 # v21 resets these to the v14 values (v20's duel tuning scored 3.52 on the track)
-STRAFE_MIN, STRAFE_MAX = 0.5, 1.1   # seconds between direction changes
+STRAFE_MIN, STRAFE_MAX = 0.3, 0.7   # seconds between direction changes
 STRAFE_FLIP_P = 1.0                 # chance a change actually reverses direction
 STRAFE_W = 1.4                      # sideways weight vs the range-keeping component
-FIGHT_BOOST_E = 70.0                # boost while fighting above this energy
+FIGHT_BOOST_E = 55.0                # boost while fighting above this energy
 REGEN_FIRST = 0.0                   # don't shoot crates / drones below this HP: dealing damage blocks regen
 LEAD_K = 1.0                        # fraction of the computed gun lead we apply
-JUMP_FIGHT = 0                      # in a fight, hop every this many seconds (random), 0 = never
-JUMP_TRAVEL = 0                     # while travelling, an occasional hop
-LASER_DODGE_JUMP = False            # top bots are airborne 1% of fights: sidestep a charging laser, don't hop
-CALM_SPEED = 0.7                    # top-5 leaderboard bots: ~6 m/s and no boost when not fighting
-GUN_FIGHT_RANGE = 100.0             # preferred distance with gun / laser
+JUMP_FIGHT = (1.6, 3.2)             # in a fight, hop every this many seconds (random), 0 = never
+JUMP_TRAVEL = (5.0, 9.0)            # while travelling, an occasional hop
+GUN_FIGHT_RANGE = 60.0              # preferred distance with gun / laser
 COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
 LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
@@ -107,6 +104,7 @@ SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, 
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
 ANTI_LASER_ARC = True    # with lightning: a laser carrier charging within 44 m is the top target (short)
+UPPER_AIM = True         # real hits: 57% of shots our LOS called blocked had the target's upper body clear
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
 LASERLESS_EVADE = False  # no laser of our own: break sight with laser carriers beyond 50 m instead of trading
@@ -386,7 +384,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v28"
+    name = "survivor-v29"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -487,8 +485,8 @@ class Bot:
         self.corridor = False
         if R < 40:
             return None
-        outer = R - max(22.0, 0.25 * R)   # 50-75% of the radius: room to manoeuvre when the zone moves
-        inner = 0.5 * R
+        outer = R - max(15.0, 0.15 * R)
+        inner = 0.6 * R
         dx, dy = x - nc[0], y - nc[1]
         d = math.hypot(dx, dy)
         sx, sy = nc[0] - c[0], nc[1] - c[1]
@@ -1067,6 +1065,9 @@ class Bot:
             else:
                 self.charging_since.pop(m["id"], None)
             vis = nav.los((x, y, eye), center_of(m))
+            if not vis and UPPER_AIM:
+                h_ = 9.0 * (1.0 + 0.05 * (m.get("cubes", 0) or 0))
+                vis = nav.los((x, y, eye), (p[0], p[1], p[2] + h_ * 0.92))
             mhpf = (m.get("hp", 1400) or 1) / max(1.0, m.get("max_hp", 1400) or 1400)
             hostile.append({"m": m, "d": d, "aiming": aiming, "attacked": attacked, "vis": vis, "hpf": mhpf})
 
@@ -1289,7 +1290,7 @@ class Bot:
             if zone_urgent:
                 goal = spot
                 state = "zone"
-                boost = (not in_zone) or time_to_shrink < travel + 5
+                boost = (not in_zone) or (energy > 70 and dist_spot > 60)
             elif hiding:
                 goal = self.hide_xy
                 state = "hide"
@@ -1363,18 +1364,9 @@ class Bot:
                 mvy += bx * self.strafe * 1.2
                 mvx, mvy = self.deflect(x, y, mvx, mvy)
                 boost = energy > 15
-                if LASER_DODGE_JUMP and me.get("grounded") and t - cs > 0.45:
+                if me.get("grounded") and t - cs > 0.45:
                     jump = True
                 break
-
-        # calm travel like the top leaderboard bots: slower, no boost unless the zone is on us
-        if CALM_SPEED < 1.0 and in_zone and state.split("/")[0] in (
-                "spot", "zone", "loot", "cube", "seek", "explore", "vulture", "loot-death", "farm", "hold", "drop",
-                "drop-wait") and t - self.threat_t > 3.0 and time_to_shrink > travel + 5 and not jump:
-            ml_ = math.hypot(mvx, mvy)
-            if ml_ > CALM_SPEED:
-                mvx, mvy = mvx / ml_ * CALM_SPEED, mvy / ml_ * CALM_SPEED
-            boost = False
 
         # hop every now and then: harder to hit, more erratic
         if me.get("grounded") and not jump and t >= self.next_hop:
@@ -1555,6 +1547,15 @@ class Bot:
                 airborne = False
             else:
                 c = center_of(m)
+                if UPPER_AIM and m.get("kind") == "mech" and not nav.los((x, y, muzzle), c, skip_end=2.5):
+                    # centre behind low cover: aim at the exposed upper body (real hits show this works)
+                    p_ = m["pos"]
+                    h_ = 9.0 * (1.0 + 0.05 * (m.get("cubes", 0) or 0))
+                    for frac in (0.75, 0.92):
+                        c2 = (p_[0], p_[1], p_[2] + h_ * frac)
+                        if nav.los((x, y, muzzle), c2, skip_end=2.5):
+                            c = c2
+                            break
                 v = m.get("vel") or (0.0, 0.0, 0.0)
                 airborne = abs(v[2]) > 0.5
             d3 = math.sqrt((c[0] - x) ** 2 + (c[1] - y) ** 2 + (c[2] - muzzle) ** 2)
@@ -2034,8 +2035,6 @@ class Bot:
                 self.known_crates.pop(best[2], None)  # got there, nothing to shoot: gone
                 return None
             return self.item_goal(p, "seek")
-        if CALM_STILL:
-            return None  # only go for crates / drones we have seen; otherwise hold our spot
         ep = self.explore_pt
         if ep is None or math.hypot(ep[0] - x, ep[1] - y) < 12 or t - self.explore_t > 25 or \
                 not self.in_circle(ep[0], ep[1], zcx, zcy, zr, 40):
