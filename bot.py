@@ -36,6 +36,8 @@ FIGHT_HIDE = False       # break line of sight mid-fight when losing
 FARM_NPC_R, FARM_CRATE_R, FARM_CRATE_T, FARM_HP = 75.0, 55.0, 260.0, 0.6
 DODGE_SHELLS = True      # run out of the splash of incoming mortar shells
 BULLET_ALERT = True      # turn toward bullets flying at us before they land
+FARM_ROAM = True         # actively hunt crates and drones for cubes early on
+FARM_UNTIL = 230.0       # ... until this match time
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -307,7 +309,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v6"
+    name = "survivor-v7"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -345,6 +347,10 @@ class Bot:
         self.state = ""
         self.slow_ticks = 0
         self.hide_xy = None
+        self.known_crates = {}
+        self.known_npcs = {}
+        self.explore_pt = None
+        self.explore_t = -99.0
         self.jink = 0.0
         self.jink_t = -1.0
         self.jink_dir = (1.0, 0.0)
@@ -743,6 +749,10 @@ class Bot:
             self.last_target_t = t
 
         threats = [h for h in hostile if h["d"] < 150 and (h["attacked"] or h["aiming"] or h["d"] < 90)]
+
+        # remember crates and drones we have seen (they don't move far)
+        if FARM_ROAM:
+            self.remember_farm(obs, x, y, (x, y, eye), t)
 
         # farm npc/crates when calm
         calm = not threats and not zone_urgent and t - self.threat_t > 4
@@ -1253,7 +1263,77 @@ class Bot:
             if d > want:
                 return (p[0], p[1], "farm")
             return (x, y, "farm")
+        if FARM_ROAM and t < FARM_UNTIL and hpf > FARM_HP:
+            g = self.roam_goal(x, y, zone, zcx, zcy, zr)
+            if g is not None:
+                return g
         return None
+
+    def remember_farm(self, obs, x, y, eye, t):
+        kc = self.known_crates
+        seen = set()
+        for c in obs.get("crates", []):
+            kc[c["id"]] = (c["pos"], t)
+            seen.add(c["id"])
+        for m in obs.get("mechs", []):
+            if m.get("kind") == "npc":
+                self.known_npcs[m["id"]] = (m["pos"], t)
+        # forget crates that should be visible but aren't (destroyed)
+        for cid in list(kc.keys()):
+            if cid in seen:
+                continue
+            p = kc[cid][0]
+            if math.hypot(p[0] - x, p[1] - y) < 40 and self.nav.los(eye, (p[0], p[1], p[2] + 1.2), 1.0):
+                del kc[cid]
+        for nid in list(self.known_npcs.keys()):
+            if t - self.known_npcs[nid][1] > 45:
+                del self.known_npcs[nid]
+        for m in obs.get("events", []):
+            if m.get("type") == "kill":
+                self.known_npcs.pop(m.get("target"), None)
+
+    def roam_goal(self, x, y, zone, zcx, zcy, zr):
+        """Go to the nearest remembered crate / drone, else explore inside the zone to find some."""
+        t = self.t
+        nav = self.nav
+        best = None
+        for cid, (p, ts) in self.known_crates.items():
+            if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25) or p[2] - nav.ground(p[0], p[1]) > 2.5:
+                continue
+            d = math.hypot(p[0] - x, p[1] - y)
+            if d < 200 and (best is None or d < best[0]):
+                best = (d, p, cid, "crate")
+        for nid, (p, ts) in self.known_npcs.items():
+            if not self.in_circle(p[0], p[1], zcx, zcy, zr, 25):
+                continue
+            d = math.hypot(p[0] - x, p[1] - y) - 25.0  # 2 cubes: worth a detour
+            if d < 200 and (best is None or d < best[0]):
+                best = (d, p, nid, "npc")
+        if best is not None:
+            p = best[1]
+            if math.hypot(p[0] - x, p[1] - y) < 6.0 and best[3] == "crate":
+                self.known_crates.pop(best[2], None)  # got there, nothing to shoot: gone
+                return None
+            return (p[0], p[1], "seek")
+        ep = self.explore_pt
+        if ep is None or math.hypot(ep[0] - x, ep[1] - y) < 12 or t - self.explore_t > 25 or \
+                not self.in_circle(ep[0], ep[1], zcx, zcy, zr, 40):
+            nc = zone["next_center"]
+            cands = []
+            for _ in range(10):
+                a = self.rng.uniform(-math.pi, math.pi)
+                r = self.rng.uniform(70, 150)
+                px, py = x + r * math.cos(a), y + r * math.sin(a)
+                if not self.in_circle(px, py, zcx, zcy, zr, 45) or not nav.free(px, py):
+                    continue
+                cands.append((math.hypot(px - nc[0], py - nc[1]) + self.rng.uniform(0, 80), px, py))
+            if not cands:
+                return None
+            cands.sort()
+            self.explore_pt = (cands[0][1], cands[0][2])
+            self.explore_t = t
+            ep = self.explore_pt
+        return (ep[0], ep[1], "explore")
 
     def want_take(self, obs, x, y, z, slots, weapons):
         t = self.t
