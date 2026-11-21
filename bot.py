@@ -56,21 +56,23 @@ GUN_MAX_RANGE = 150.0    # don't give our position away with low-odds long gun s
 COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% cook-off)
 WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
 # duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
-STRAFE_MIN, STRAFE_MAX = 0.25, 0.5  # seconds between direction changes
-STRAFE_FLIP_P = 1.0                 # chance a change actually reverses direction
-STRAFE_W = 1.6                      # sideways weight vs the range-keeping component
-FIGHT_BOOST_E = 70.0
-REGEN_FIRST = 0.9                   # don't shoot crates / drones below this HP: dealing damage blocks regen
+# v21 resets these to the v14 values (v20's duel tuning scored 3.52 on the track)
+STRAFE_MIN, STRAFE_MAX = 0.6, 1.5   # seconds between direction changes
+STRAFE_FLIP_P = 0.7                 # chance a change actually reverses direction
+STRAFE_W = 0.9                      # sideways weight vs the range-keeping component
+FIGHT_BOOST_E = 40.0                # boost while fighting above this energy
+REGEN_FIRST = 0.0                   # don't shoot crates / drones below this HP: dealing damage blocks regen
 LEAD_K = 1.0                        # fraction of the computed gun lead we apply
-GUN_FIGHT_RANGE = 100.0             # preferred distance with gun / laser                # boost while fighting above this energy
+GUN_FIGHT_RANGE = 75.0              # preferred distance with gun / laser
 COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
 LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 # lightning counters the built-ins' lasers (short) and auto-aims: prefer it, fight close, rush chargers
-LIGHTNING_BRAWL = False  # duels: rushing to 28 m loses (84:60 vs 100:40 without)
+LIGHTNING_BRAWL = False  # laser first: the real built-ins kill with lasers at 90-150 m
 # a quarter of crates / loot sit on roofs, uncontested: jet up to roofs this low (m above the street)
 ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
+EARLY_RANGE = 230.0      # how far we walk for a laser / lightning in the first 45 s
 EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
 ENDGAME_ALIVE = 3        # with this few mechs left: no farming / vulture, start fights only under 45 m
 ROOF_MAX = 36.0
@@ -83,6 +85,12 @@ DANGER_MAP = False       # early on, farm / explore away from where we hear figh
 DANGER_UNTIL = 90.0      # ... during the first seconds (the opening is the bloodiest part)
 DANGER_TAU = 20.0        # seconds for a heard fight to fade
 DANGER_CELL = 20.0
+LASER_PEEK = True        # a laser carrier charging at us: duck out of its sight within ~6 m until it fires
+PEEK_HOLD = 1.1          # stay hidden this long after the charge stops (their cooldown is 1.65 s)
+LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
+LASER_HUNT_RANGE = 300.0
+LASERLESS_EVADE = True   # no laser of our own: break sight with laser carriers beyond 50 m instead of trading
+COVER_FIGHT = True       # fighting a laser carrier: keep a wall within a few meters
 ANTI_FOCUS_HOLD = 6.0    # just over their 5 s tracking memory
 MORTAR_VISIBLE_MIN = 110.0  # lob at visible mechs only beyond this; hidden ones at any range 35-225 m
 if MORTAR_MODE:
@@ -358,7 +366,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v20"
+    name = "survivor-v21"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -407,6 +415,11 @@ class Bot:
         self.endgame = False
         self.focus_hide_until = -99.0
         self.danger = {}
+        self.peek_xy = None
+        self.known_pickups = {}
+        self.peek_until = -99.0
+        self.fight_cover = None
+        self.fight_cover_t = -99.0
         self.prog = []
         self.detour = None
         self.detour_until = -99.0
@@ -515,6 +528,23 @@ class Bot:
         if e < 1e-6:
             return dx / d, dy / d
         return ex / e, ey / e
+
+    def quick_cover(self, x, y, eye):
+        """A spot within ~7 m, walkable in a straight line, that `eye` cannot see; or None."""
+        nav = self.nav
+        deadline = time.perf_counter() + 0.004
+        bx = math.atan2(y - eye[1], x - eye[0])  # try sideways first, then away
+        for r in (2.5, 4.0, 5.5, 7.0):
+            for k in (3, -3, 2, -2, 4, -4, 1, -1, 5, -5, 0, 6):
+                a = bx + k * (math.pi / 6)
+                px, py = x + r * math.cos(a), y + r * math.sin(a)
+                if nav.blk[nav.idx(px, py)] == 2 or not nav.walk_clear(x, y, px, py, r + 0.5):
+                    continue
+                if self.hidden_from(px, py, [eye]):
+                    return (px, py)
+                if time.perf_counter() > deadline:
+                    return None
+        return None
 
     def hidden_from(self, px, py, eyes):
         g = self.nav.ground(px, py)
@@ -1003,6 +1033,10 @@ class Bot:
                 if target not in threats:
                     eyes.append((p[0], p[1], p[2] + 8.0))
                 hide_xy = self.hide_spot(x, y, eyes, (zcx, zcy, zr), t)
+            if LASERLESS_EVADE and hide_xy is None and not zone_urgent and laser is None and d > 50 and                     "laser" in (m.get("weapons") or []):
+                eyes_l = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0) for h in hostile
+                          if h["vis"] and "laser" in (h["m"].get("weapons") or [])][:3]
+                hide_xy = self.hide_spot(x, y, eyes_l or [(p[0], p[1], p[2] + 8.0)], (zcx, zcy, zr), t)
             if focused and hide_xy is None and not zone_urgent:
                 hide_xy = self.hide_spot(x, y, focus_eyes, (zcx, zcy, zr), t)
                 if hide_xy is not None:
@@ -1039,6 +1073,17 @@ class Bot:
                     mvx, mvy = mvx * 0.3 + zx / zd, mvy * 0.3 + zy / zd
             mvx, mvy = self.deflect(x, y, mvx, mvy)
             boost = energy > max(FIGHT_BOOST_E, 45 if light else 25)
+            if COVER_FIGHT and not retreat and "laser" in (m.get("weapons") or []):
+                # fight a laser carrier from next to a wall, so a charge can be dodged by stepping behind it
+                fc = self.fight_cover
+                if fc is None or t - self.fight_cover_t > 1.0 or math.hypot(fc[0] - x, fc[1] - y) > 25:
+                    fc = self.fight_cover = nav.cover_near(x, y, 8)
+                    self.fight_cover_t = t
+                if fc is not None:
+                    cdx, cdy = fc[0] - x, fc[1] - y
+                    cd = math.hypot(cdx, cdy)
+                    if cd > 3.0:
+                        mvx, mvy = self.deflect(x, y, mvx * 0.6 + cdx / cd * 0.8, mvy * 0.6 + cdy / cd * 0.8)
             if LIGHTNING_BRAWL and light and not retreat and state == "fight":
                 if m.get("charging") and d < 90:
                     # their laser is charging: close in, the arc shorts it out
@@ -1138,6 +1183,33 @@ class Bot:
                     jump = True
                 break
 
+        # laser peek: a laser carrier is charging at us -> get out of its sight before it lets go
+        if LASER_PEEK and not zone_urgent:
+            lt = None
+            for h in hostile:
+                mm_ = h["m"]
+                if not h["vis"] or "laser" not in (mm_.get("weapons") or []) or not mm_.get("charging"):
+                    continue
+                pp_ = mm_["pos"]
+                err_ = abs(wrap(mm_["aim"][0] - math.atan2(y - pp_[1], x - pp_[0])))
+                if err_ < 0.12 and h["d"] < 290 and (lt is None or h["d"] < lt["d"]):
+                    lt = h
+            if lt is not None:
+                pp_ = lt["m"]["pos"]
+                e_ = (pp_[0], pp_[1], pp_[2] + 8.0)
+                if self.peek_xy is None or t > self.peek_until or \
+                        not self.hidden_from(self.peek_xy[0], self.peek_xy[1], [e_]):
+                    self.peek_xy = self.quick_cover(x, y, e_)
+                if self.peek_xy is not None:
+                    self.peek_until = t + PEEK_HOLD
+            if self.peek_xy is not None and t < self.peek_until:
+                dxp, dyp = self.peek_xy[0] - x, self.peek_xy[1] - y
+                dp = math.hypot(dxp, dyp)
+                mvx, mvy = (dxp / dp, dyp / dp) if dp > 0.8 else (0.0, 0.0)
+                boost = energy > 5
+                jump = False
+                state = "peek"
+
         # erratic sidesteps even when nobody seems to be shooting at us
         if JINK and state.split("/")[0] in ("spot", "zone", "loot", "cube", "hold", "farm", "spawncover", "hide") \
                 and not jump:
@@ -1174,7 +1246,7 @@ class Bot:
 
         # walls / roofs in the way of a travel move: jump-jet over them
         climbing = False
-        if state not in ("fight", "retreat", "dodge") and not jump:
+        if state not in ("fight", "retreat", "dodge", "peek") and not jump:
             cl = self.climb_ctl(x, y, z, mvx, mvy, me.get("grounded", True), energy, not in_zone)
             if cl is not None:
                 climbing = True
@@ -1506,9 +1578,15 @@ class Bot:
             swap_kinds.add("lightning")
         if MORTAR_MODE and not have_empty and "gun" in slots and "mortar" in slots and "lightning" not in slots:
             swap_kinds.add("lightning")
+        if LASER_HUNT and not have_empty and "laser" not in slots and "gun" in slots:
+            swap_kinds.add("laser")  # gun + lightning: trade the lightning for a laser
         if have_empty or swap_kinds:
             best = None
-            for pk in obs.get("pickups", []):
+            seen_pk = list(obs.get("pickups", []))
+            if LASER_HUNT:
+                ids_ = {pk["id"] for pk in seen_pk}
+                seen_pk += [{"id": k, "kind": v[0], "pos": v[1]} for k, v in self.known_pickups.items() if k not in ids_]
+            for pk in seen_pk:
                 if pk["kind"] not in WANT_WEAPON or pk["kind"] in slots:
                     continue
                 if not have_empty and pk["kind"] not in swap_kinds:
@@ -1520,7 +1598,11 @@ class Bot:
                     continue
                 d = math.hypot(p[0] - x, p[1] - y)
                 s = d - 15 * WANT_WEAPON[pk["kind"]]
-                if d < (170 if EARLY_WEAPON and t < 45 else 110) and (best is None or s < best[0]):
+                reach_ = EARLY_RANGE if EARLY_WEAPON and t < 45 else 110
+                if LASER_HUNT and pk["kind"] == "laser" and "laser" not in slots:
+                    reach_ = max(reach_, LASER_HUNT_RANGE)
+                    s -= 60
+                if d < reach_ and (best is None or s < best[0]):
                     best = (s, p)
             if best:
                 return self.item_goal(best[1], "loot")
@@ -1643,6 +1725,19 @@ class Bot:
         for m in obs.get("mechs", []):
             if m.get("kind") == "npc":
                 self.known_npcs[m["id"]] = (m["pos"], t)
+        if LASER_HUNT:
+            kp = self.known_pickups
+            pseen = set()
+            for pk in obs.get("pickups", []):
+                kp[pk["id"]] = (pk["kind"], pk["pos"])
+                pseen.add(pk["id"])
+            for pid in list(kp.keys()):
+                if pid in pseen:
+                    continue
+                pp = kp[pid][1]
+                dd = math.hypot(pp[0] - x, pp[1] - y)
+                if dd < 3.0 or (dd < 40 and self.nav.los(eye, (pp[0], pp[1], pp[2] + 0.5), 1.0)):
+                    del kp[pid]  # someone took it
         kq = self.known_cubes
         cseen = set()
         for c in obs.get("cubes", []):
@@ -1738,6 +1833,8 @@ class Bot:
                 m = slots.get("mortar")
                 if m is not None:
                     return (pk["id"], m[0])
+                if LASER_HUNT and k == "laser" and slots.get("lightning") is not None and slots.get("gun") is not None:
+                    return (pk["id"], slots["lightning"][0])
                 # gun + laser and a lightning here: laser + lightning beats gun + laser
                 if LIGHTNING_BRAWL and k == "lightning" and "laser" in slots and slots.get("gun") is not None:
                     return (pk["id"], slots["gun"][0])
