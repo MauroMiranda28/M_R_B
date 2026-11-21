@@ -24,12 +24,18 @@ UPGRADE_PRIORITY = [
     "mortar_reload", "mortar_velocity", "mortar_splash",
 ]
 # survival-first: never start fights, hide from anyone we see, shoot only when cornered
-PACIFIST = True
-AGGRO_RANGE = 60.0       # engage non-hostile mechs closer than this
-UNSEEN_HIDE_HP = 0.6     # hide from an attacker we can't see below this HP fraction
-SPAWN_COVER_T = 15.0     # seconds after spawn spent getting into cover before looting
-JINK = True              # erratic sidesteps all the time, not only when hit
-ZONE_EDGE = True         # live in a band just inside the next circle's edge, not deep inside
+# v6 = the v1 style (best on the track so far) + projectile awareness.
+# Track scores: v1 3.54 (aggressive, farms) > v3 3.31 > v2 2.85 > v5 2.21 (pacifist, hides, edge, jink).
+PACIFIST = False
+AGGRO_RANGE = 95.0       # engage non-hostile mechs closer than this
+UNSEEN_HIDE_HP = 0.0     # hide from an attacker we can't see below this HP fraction
+SPAWN_COVER_T = 0.0      # seconds after spawn spent getting into cover before looting
+JINK = False             # erratic sidesteps all the time, not only when hit
+ZONE_EDGE = False        # live in a band just inside the next circle's edge, not deep inside
+FIGHT_HIDE = False       # break line of sight mid-fight when losing
+FARM_NPC_R, FARM_CRATE_R, FARM_CRATE_T, FARM_HP = 75.0, 55.0, 260.0, 0.6
+DODGE_SHELLS = True      # run out of the splash of incoming mortar shells
+BULLET_ALERT = True      # turn toward bullets flying at us before they land
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -301,7 +307,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v5"
+    name = "survivor-v6"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -485,6 +491,53 @@ class Bot:
         self.hide_t = t
         self.hide_xy = found
         return found
+
+    def projectile_react(self, obs, x, y, z, vx, vy, t):
+        """Returns a move vector away from a mortar landing near us, or None.
+        Also turns bullets heading at us into a threat bearing."""
+        mort = self.w_cfg.get("mortar", {})
+        g = mort.get("gravity", 22.0)
+        splash = mort.get("splash_radius", 7.0)
+        best = None
+        for pr in obs.get("projectiles", []):
+            k = pr.get("kind")
+            p, v = pr["pos"], pr["vel"]
+            if k == "mortar" and DODGE_SHELLS:
+                # time until the shell comes down to our feet height
+                a, b, c = -0.5 * g, v[2], p[2] - z
+                disc = b * b - 4 * a * c
+                if disc < 0:
+                    continue
+                tt = (-b - math.sqrt(disc)) / (2 * a)
+                if tt <= 0 or tt > 6:
+                    continue
+                ix, iy = p[0] + v[0] * tt, p[1] + v[1] * tt
+                px, py = x + vx * min(tt, 0.6), y + vy * min(tt, 0.6)
+                d = math.hypot(px - ix, py - iy)
+                if d < splash + 5.0 and (best is None or tt < best[0]):
+                    if d < 0.5:
+                        hx, hy = -v[1], v[0]
+                    else:
+                        hx, hy = px - ix, py - iy
+                    hl = math.hypot(hx, hy) or 1.0
+                    best = (tt, hx / hl, hy / hl)
+            elif k in ("gun", "npc") and BULLET_ALERT:
+                rx, ry, rz = x - p[0], y - p[1], z + 4.5 - p[2]
+                vv = v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+                if vv < 1:
+                    continue
+                s_ = (rx * v[0] + ry * v[1] + rz * v[2]) / vv
+                if s_ <= 0 or s_ > 1.5:
+                    continue
+                cx, cy, cz = p[0] + v[0] * s_ - x, p[1] + v[1] * s_ - y, p[2] + v[2] * s_ - (z + 4.5)
+                if cx * cx + cy * cy < 16 and abs(cz) < 6 and k == "gun":
+                    self.threat_bearing = math.atan2(-v[1], -v[0])
+                    self.threat_t = t
+        if best is None:
+            return None
+        mvx, mvy = best[1], best[2]
+        mvx, mvy = self.deflect(x, y, mvx, mvy, 4.0)
+        return mvx, mvy
 
     def climb_ctl(self, x, y, z, mx, my, grounded, energy, urgent):
         m = math.hypot(mx, my)
@@ -696,15 +749,15 @@ class Bot:
         farm = None
         if target is None and calm and hpf > 0.5 and not PACIFIST:
             for d, m in npcs:
-                if d < 60 and nav.los((x, y, eye), center_of(m)):
+                if d < FARM_NPC_R and nav.los((x, y, eye), center_of(m)):
                     farm = ("npc", m)
                     break
-            if farm is None and t < 170 and hpf > 0.7:
+            if farm is None and t < FARM_CRATE_T and hpf > FARM_HP:
                 best = None
                 for c in obs.get("crates", []):
                     p = c["pos"]
                     d = math.hypot(p[0] - x, p[1] - y)
-                    if d < 40 and (best is None or d < best[0]) and \
+                    if d < FARM_CRATE_R and (best is None or d < best[0]) and \
                             nav.los((x, y, eye), (p[0], p[1], p[2] + 1.2)):
                         best = (d, c)
                 if best:
@@ -748,7 +801,7 @@ class Bot:
                 press = (target["hpf"] < 0.25 and d < 80 and nthreat <= 1 and hpf > 0.3) or \
                     (light and d < 38 and my_power > their_power * 1.2 and nthreat <= 1)
                 want_hide = True
-            if not press and want_hide and not zone_urgent:
+            if FIGHT_HIDE and not press and want_hide and not zone_urgent:
                 eyes = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0)
                         for h in (threats or [target])][:3]
                 if target not in threats:
@@ -852,6 +905,14 @@ class Bot:
                 mvx, mvy = self.deflect(x, y, mvx, mvy)
                 boost = boost or energy > 40
 
+        # incoming projectiles: dodge mortar splash, notice bullets aimed at us
+        if DODGE_SHELLS or BULLET_ALERT:
+            dz_ = self.projectile_react(obs, x, y, z, vx, vy, t)
+            if dz_ is not None:
+                mvx, mvy = dz_
+                boost = energy > 5
+                state = "dodge"
+
         # laser dodge: someone charging at us
         jump = False
         for h in hostile:
@@ -903,7 +964,7 @@ class Bot:
 
         # walls / roofs in the way of a travel move: jump-jet over them
         climbing = False
-        if state not in ("fight", "retreat") and not jump:
+        if state not in ("fight", "retreat", "dodge") and not jump:
             cl = self.climb_ctl(x, y, z, mvx, mvy, me.get("grounded", True), energy, not in_zone)
             if cl is not None:
                 climbing = True
