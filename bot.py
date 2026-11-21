@@ -32,7 +32,7 @@ if VISION_FIRST:
 # v6 = the v1 style (best on the track so far) + projectile awareness.
 # Track scores: v1 3.54 (aggressive, farms) > v3 3.31 > v2 2.85 > v5 2.21 (pacifist, hides, edge, jink).
 PACIFIST = False
-AGGRO_RANGE = 95.0       # engage non-hostile mechs closer than this
+AGGRO_RANGE = 160.0      # engage non-hostile mechs closer than this
 UNSEEN_HIDE_HP = 0.0     # hide from an attacker we can't see below this HP fraction
 SPAWN_COVER_T = 0.0      # seconds after spawn spent getting into cover before looting
 JINK = False             # erratic sidesteps all the time, not only when hit
@@ -47,8 +47,8 @@ FARM_RANGE = 260.0       # how far we walk to a remembered crate / drone
 DROP_RANGE = 260.0       # how far we go for a supply drop (3 cubes + full HP/energy)
 CUBE_RANGE = 150.0       # how far we walk to a seen / remembered cube
 VULTURE = True           # walk toward fights we hear, finish the wounded, loot death cubes
-VULTURE_HP = 0.6         # only when at least this healthy
-VULTURE_STANDOFF = 70.0  # stop this far from the estimated fight
+VULTURE_HP = 0.5         # only when at least this healthy
+VULTURE_STANDOFF = 45.0  # stop this far from the estimated fight
 FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion")
 SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 # v11 small-tweaks package
@@ -57,13 +57,15 @@ COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% 
 WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
 # duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
 # v21 resets these to the v14 values (v20's duel tuning scored 3.52 on the track)
-STRAFE_MIN, STRAFE_MAX = 0.6, 1.5   # seconds between direction changes
-STRAFE_FLIP_P = 0.7                 # chance a change actually reverses direction
-STRAFE_W = 0.9                      # sideways weight vs the range-keeping component
-FIGHT_BOOST_E = 40.0                # boost while fighting above this energy
+STRAFE_MIN, STRAFE_MAX = 0.3, 0.7   # seconds between direction changes
+STRAFE_FLIP_P = 1.0                 # chance a change actually reverses direction
+STRAFE_W = 1.4                      # sideways weight vs the range-keeping component
+FIGHT_BOOST_E = 55.0                # boost while fighting above this energy
 REGEN_FIRST = 0.0                   # don't shoot crates / drones below this HP: dealing damage blocks regen
 LEAD_K = 1.0                        # fraction of the computed gun lead we apply
-GUN_FIGHT_RANGE = 75.0              # preferred distance with gun / laser
+JUMP_FIGHT = (1.6, 3.2)             # in a fight, hop every this many seconds (random), 0 = never
+JUMP_TRAVEL = (5.0, 9.0)            # while travelling, an occasional hop
+GUN_FIGHT_RANGE = 60.0              # preferred distance with gun / laser
 COMBAT_ENERGY_KEEP = 40.0  # keep this much energy for an escape jet instead of boosting it away
 LONG_STUCK = True        # no real progress for 8 s while travelling: drop the route, take a detour
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
@@ -85,17 +87,21 @@ DANGER_MAP = False       # early on, farm / explore away from where we hear figh
 DANGER_UNTIL = 90.0      # ... during the first seconds (the opening is the bloodiest part)
 DANGER_TAU = 20.0        # seconds for a heard fight to fade
 DANGER_CELL = 20.0
-LASER_PEEK = True        # a laser carrier charging at us: duck out of its sight within ~6 m until it fires
+LASER_PEEK = False       # a laser carrier charging at us: duck out of its sight within ~6 m until it fires
 PEEK_HOLD = 1.1          # stay hidden this long after the charge stops (their cooldown is 1.65 s)
-ROOF_CAMP = True         # live on low-exposure roofs inside the next circle (precomputed in roofspots.json)
+ROOF_CAMP = False        # live on low-exposure roofs inside the next circle (precomputed in roofspots.json)
 ROOF_CAMP_START = 20.0   # grab a nearby weapon first (going up at t=0 scored worse in the sim)
 ROOF_DIST_W = 0.5        # roof choice: exposure*300 + distance*this
 ROOF_MIN_R = 30.0        # no roof camping once the next circle is smaller than this
 ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when attacked)
+# diagnostic probes for the track (None = normal bot):
+#   "idle":   never fights, never loots, follows the zone, otherwise stands still
+#   "runner": never fights, follows the zone, keeps moving away from every mech it sees or fight it hears
+PROBE = None
 LASER_HUNT = True        # remember weapons on the ground; without a laser, go up to 300 m for one any time
 LASER_HUNT_RANGE = 300.0
-LASERLESS_EVADE = True   # no laser of our own: break sight with laser carriers beyond 50 m instead of trading
-COVER_FIGHT = True       # fighting a laser carrier: keep a wall within a few meters
+LASERLESS_EVADE = False  # no laser of our own: break sight with laser carriers beyond 50 m instead of trading
+COVER_FIGHT = False      # fighting a laser carrier: keep a wall within a few meters
 ANTI_FOCUS_HOLD = 6.0    # just over their 5 s tracking memory
 MORTAR_VISIBLE_MIN = 110.0  # lob at visible mechs only beyond this; hidden ones at any range 35-225 m
 if MORTAR_MODE:
@@ -371,7 +377,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v22"
+    name = "survivor-v23"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -428,6 +434,7 @@ class Bot:
         self.endgame = False
         self.focus_hide_until = -99.0
         self.danger = {}
+        self.next_hop = 3.0
         self.peek_xy = None
         self.known_pickups = {}
         self.peek_until = -99.0
@@ -822,7 +829,68 @@ class Bot:
         return math.atan2(dy, dx), math.atan2(q[2] - mz, max(hd, 0.1)), math.sqrt(hd * hd + (q[2] - mz) ** 2)
 
     # ------------------------------------------------------------------ main
+    def probe_act(self, obs):
+        t0 = time.perf_counter()
+        self.t = t = obs["t"]
+        me = obs["self"]
+        x, y, z = me["pos"]
+        act = {"tick": obs["tick"]}
+        if obs.get("offer") and obs["offer"].get("choices"):
+            act["pick"] = 0
+        zone = obs["zone"]
+        zcx, zcy, zr = self.zone_now(zone, t)
+        spot, at_spot = self.safe_spot(zone, x, y)
+        in_zone = me.get("in_zone", True)
+        goal = None if at_spot else spot
+        threat = False
+        if PROBE == "runner":
+            ax = ay = 0.0
+            for m in obs.get("mechs", []):
+                if m.get("kind") != "mech":
+                    continue
+                p = m["pos"]
+                d = math.hypot(p[0] - x, p[1] - y)
+                if 1.0 < d < 220:
+                    ax += (x - p[0]) / d / max(d, 20.0) * 100
+                    ay += (y - p[1]) / d / max(d, 20.0) * 100
+            for snd in obs.get("sounds", []):
+                if snd.get("kind") in FIGHT_SOUNDS + ("step", "boost", "jet") and snd.get("dist") in ("near", "mid")                         and snd.get("bearing") is not None:
+                    w = 1.0 if snd.get("dist") == "near" else 0.5
+                    ax -= math.cos(snd["bearing"]) * w
+                    ay -= math.sin(snd["bearing"]) * w
+            al = math.hypot(ax, ay)
+            if al > 0.2:
+                threat = True
+                self.run_dir = (ax / al, ay / al)
+                self.run_until = t + 3.0
+            if t < getattr(self, "run_until", -1.0):
+                gx, gy = x + self.run_dir[0] * 40.0, y + self.run_dir[1] * 40.0
+                nc, nr = zone["next_center"], zone["next_radius"]
+                for _ in range(6):  # keep the flight point inside both circles
+                    if self.in_circle(gx, gy, zcx, zcy, zr, 25) and self.in_circle(gx, gy, nc[0], nc[1], max(nr, 30), 5):
+                        break
+                    gx, gy = (gx + nc[0]) * 0.5, (gy + nc[1]) * 0.5
+                goal = (gx, gy)
+        mvx = mvy = 0.0
+        if goal is not None and math.hypot(goal[0] - x, goal[1] - y) > 2.0:
+            mvx, mvy = self.nav_move(x, y, goal[0], goal[1], t0 + 0.011)
+        boost = (not in_zone) or threat
+        cl = self.climb_ctl(x, y, z, mvx, mvy, me.get("grounded", True), me.get("energy", 0), not in_zone)
+        if cl == "jump":
+            act["jump"] = True
+        elif cl == "jet":
+            boost = True
+        elif cl == "wait":
+            mvx = mvy = 0.0
+        ayaw = me["aim"][0]
+        act.update(move=[round(mvx, 3), round(mvy, 3)], boost=bool(boost),
+                   aim=[round(wrap(ayaw + (0.8 if PROBE == "runner" else 0.0)), 4), 0.0])
+        mf.draw.label("probe %s t%.0f hp%.0f" % (PROBE, t, me["hp"]))
+        return act
+
     def act(self, obs):
+        if PROBE:
+            return self.probe_act(obs)
         t0 = time.perf_counter()
         budget_end = t0 + 0.011
         self.t = t = obs["t"]
@@ -1239,6 +1307,18 @@ class Bot:
                     jump = True
                 break
 
+        # hop every now and then: harder to hit, more erratic
+        if me.get("grounded") and not jump and t >= self.next_hop:
+            base_st = state.split("/")[0]
+            if base_st in ("fight", "retreat") and JUMP_FIGHT:
+                jump = True
+                self.next_hop = t + self.rng.uniform(*JUMP_FIGHT)
+            elif base_st in ("spot", "zone", "loot", "cube", "seek", "explore", "vulture", "loot-death", "farm")                     and JUMP_TRAVEL and math.hypot(mvx, mvy) > 0.5:
+                jump = True
+                self.next_hop = t + self.rng.uniform(*JUMP_TRAVEL)
+            else:
+                self.next_hop = t + 0.5
+
         # laser peek: a laser carrier is charging at us -> get out of its sight before it lets go
         if LASER_PEEK and not zone_urgent:
             lt = None
@@ -1383,6 +1463,8 @@ class Bot:
         if mm > 1.0:
             mvx, mvy = mvx / mm, mvy / mm
         act["move"] = [round(mvx, 3), round(mvy, 3)]
+        if not me.get("grounded", True) and not climbing and t >= self.jet_until:
+            boost = False  # a hop is a hop: boosting in the air would jet us up and burn the energy
         act["boost"] = bool(boost and mm > 0.2) or (t < self.jet_until and not me.get("grounded"))
         if jump:
             act["jump"] = True
