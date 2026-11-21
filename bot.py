@@ -23,6 +23,11 @@ UPGRADE_PRIORITY = [
     "gun_velocity", "gun_mag", "jets", "sensors", "lightning_chain", "laser_pierce",
     "mortar_reload", "mortar_velocity", "mortar_splash",
 ]
+# survival-first: never start fights, hide from anyone we see, shoot only when cornered
+PACIFIST = True
+AGGRO_RANGE = 60.0       # engage non-hostile mechs closer than this
+UNSEEN_HIDE_HP = 0.6     # hide from an attacker we can't see below this HP fraction
+SPAWN_COVER_T = 15.0     # seconds after spawn spent getting into cover before looting
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -294,7 +299,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v3"
+    name = "survivor-v4"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -649,8 +654,11 @@ class Bot:
             d = h["d"]
             if not h["vis"] or d > max_range:
                 continue
-            engage = h["attacked"] or d < 60 or (h["aiming"] and d < 170) or (h["hpf"] < 0.35 and d < 170) \
+            engage = h["attacked"] or d < AGGRO_RANGE or (h["aiming"] and d < 170) or (h["hpf"] < 0.35 and d < 170) \
                 or (self.last_target == h["m"]["id"] and t - self.last_target_t < 3)
+            if PACIFIST:
+                engage = d < 40 or (h["attacked"] and (d < 75 or h["hpf"] < 0.3)) or \
+                    (self.last_target == h["m"]["id"] and t - self.last_target_t < 2 and d < 75)
             if not engage:
                 continue
             s = d * (0.5 + h["hpf"]) - (150 if h["attacked"] else 0) - (60 if h["aiming"] else 0)
@@ -667,7 +675,7 @@ class Bot:
         # farm npc/crates when calm
         calm = not threats and not zone_urgent and t - self.threat_t > 4
         farm = None
-        if target is None and calm and hpf > 0.5:
+        if target is None and calm and hpf > 0.5 and not PACIFIST:
             for d, m in npcs:
                 if d < 60 and nav.los((x, y, eye), center_of(m)):
                     farm = ("npc", m)
@@ -717,6 +725,10 @@ class Bot:
                 (light and d < 35 and my_power > their_power * 1.1 and nthreat <= 1)
             hide_xy = None
             want_hide = hpf < 0.5 or nthreat >= 2 or their_power > my_power * 1.25
+            if PACIFIST:
+                press = (target["hpf"] < 0.25 and d < 80 and nthreat <= 1 and hpf > 0.3) or \
+                    (light and d < 38 and my_power > their_power * 1.2 and nthreat <= 1)
+                want_hide = True
             if not press and want_hide and not zone_urgent:
                 eyes = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0)
                         for h in (threats or [target])][:3]
@@ -757,13 +769,20 @@ class Bot:
             boost = energy > (45 if light else 25)
         else:
             # unseen attacker: hide from where the shots came from
-            if not zone_urgent and hpf < 0.6 and t - self.threat_t < 2.0 and self.threat_bearing is not None \
+            if not zone_urgent and hpf < UNSEEN_HIDE_HP and t - self.threat_t < 2.0 and self.threat_bearing is not None \
                     and not any(h["vis"] for h in threats):
                 bx, by_ = math.cos(self.threat_bearing), math.sin(self.threat_bearing)
                 pseudo = [(x + bx * 70, y + by_ * 70, z + 8.0)]
                 hs = self.hide_spot(x, y, pseudo, (zcx, zcy, zr), t)
                 if hs is not None:
                     self.hide_until = t + 6.0
+            if PACIFIST and not zone_urgent:
+                seen_eyes = [(h["m"]["pos"][0], h["m"]["pos"][1], h["m"]["pos"][2] + 8.0)
+                             for h in hostile if h["vis"] and h["d"] < 170][:3]
+                if seen_eyes:
+                    hs = self.hide_spot(x, y, seen_eyes, (zcx, zcy, zr), t)
+                    if hs is not None:
+                        self.hide_until = max(self.hide_until, t + 4.0)
             hiding = (not zone_urgent and self.hide_xy is not None and t < self.hide_until)
             if hiding and hpf < 0.9 and t - self.threat_t < 25:
                 self.hide_until = max(self.hide_until, t + 0.5)  # stay put while regenerating
@@ -1061,8 +1080,12 @@ class Bot:
     def pick_goal(self, obs, x, y, z, hpf, zone, zcx, zcy, zr, slots, weapons, farm):
         t = self.t
         nc, nr = zone["next_center"], zone["next_radius"]
+        if t < SPAWN_COVER_T:
+            if getattr(self, "spawn_cover", None) is None:
+                self.spawn_cover = self.nav.cover_near(x, y, 12) or (x, y)
+            return (self.spawn_cover[0], self.spawn_cover[1], "spawncover")
         # supply drop
-        for dr in obs.get("drops", []):
+        for dr in ([] if PACIFIST else obs.get("drops", [])):
             p = dr["pos"]
             d = math.hypot(p[0] - x, p[1] - y)
             holder = dr.get("holder")
