@@ -26,7 +26,7 @@ UPGRADE_PRIORITY = [
 # see first, aim faster: +25 m vision, +15 m proximity, half the sound bearing error, +30% turn rate
 VISION_FIRST = True
 if VISION_FIRST:
-    UPGRADE_PRIORITY = ["armor", "sensors", "gyros", "plating"] + \
+    UPGRADE_PRIORITY = ["sensors", "armor", "gyros", "plating"] + \
         [u for u in UPGRADE_PRIORITY if u not in ("sensors", "armor", "gyros", "plating")]
 # survival-first: never start fights, hide from anyone we see, shoot only when cornered
 # v6 = the v1 style (best on the track so far) + projectile awareness.
@@ -64,7 +64,6 @@ LIGHTNING_BRAWL = True
 ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
 EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
-NEAR_MECH_NO_FARM = 100.0  # no farming / vulture walks while a mech is in sight closer than this
 ENDGAME_ALIVE = 3        # with this few mechs left: no farming / vulture, start fights only under 45 m
 ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
@@ -340,7 +339,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v15"
+    name = "survivor-v14"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -387,7 +386,6 @@ class Bot:
         self.goal_roof = False
         self.path_roof = False
         self.endgame = False
-        self.near_mech = False
         self.prog = []
         self.detour = None
         self.detour_until = -99.0
@@ -826,8 +824,7 @@ class Bot:
             self.remember_farm(obs, x, y, (x, y, eye), t)
 
         # farm npc/crates when calm
-        self.near_mech = any(h["vis"] and h["d"] < NEAR_MECH_NO_FARM for h in hostile)
-        calm = not threats and not zone_urgent and t - self.threat_t > 4 and not self.near_mech
+        calm = not threats and not zone_urgent and t - self.threat_t > 4
         farm = None
         if target is None and calm and hpf > 0.5 and not PACIFIST:
             for d, m in npcs:
@@ -951,7 +948,7 @@ class Bot:
             if zone_urgent:
                 goal = spot
                 state = "zone"
-                boost = (not in_zone) or (energy > 70 and dist_spot > 60 and time_to_shrink < travel + 15)
+                boost = (not in_zone) or (energy > 70 and dist_spot > 60)
             elif hiding:
                 goal = self.hide_xy
                 state = "hide"
@@ -1007,16 +1004,14 @@ class Bot:
         jump = False
         for h in hostile:
             cs = self.charging_since.get(h["m"]["id"])
-            p_ = h["m"]["pos"]
-            aim_err = abs(wrap(h["m"]["aim"][0] - math.atan2(y - p_[1], x - p_[0])))
-            if cs is not None and aim_err < 0.21 and h["vis"] and t - cs > 0.35:
+            if cs is not None and h["aiming"] and h["vis"] and t - cs > 0.35:
                 p = h["m"]["pos"]
                 bx, by_ = (x - p[0]) / max(h["d"], 0.1), (y - p[1]) / max(h["d"], 0.1)
                 mvx += -by_ * self.strafe * 1.2
                 mvy += bx * self.strafe * 1.2
                 mvx, mvy = self.deflect(x, y, mvx, mvy)
                 boost = energy > 15
-                if me.get("grounded") and t - cs > 0.6:
+                if me.get("grounded") and t - cs > 0.45:
                     jump = True
                 break
 
@@ -1237,7 +1232,7 @@ class Bot:
                 if aim is None:
                     base_yaw = math.atan2(mvy, mvx) if mm > 0.3 else ayaw
                     if mm > 0.3:
-                        aim = [base_yaw + 1.75 * math.sin(t * 1.3), 0.0]
+                        aim = [base_yaw + 1.0 * math.sin(t * 1.3), 0.0]
                     else:
                         aim = [wrap(ayaw + 0.9), 0.0]
             if gun and gun[1].get("reload", 0) <= 0 and \
@@ -1411,7 +1406,7 @@ class Bot:
             if d > want:
                 return self.item_goal(p, "farm")
             return (x, y, "farm")
-        if self.endgame or self.near_mech:
+        if self.endgame:
             return None
         if VULTURE and hpf > VULTURE_HP:
             g = self.vulture_goal(x, y, zcx, zcy, zr)
