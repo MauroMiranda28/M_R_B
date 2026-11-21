@@ -28,6 +28,8 @@ PACIFIST = True
 AGGRO_RANGE = 60.0       # engage non-hostile mechs closer than this
 UNSEEN_HIDE_HP = 0.6     # hide from an attacker we can't see below this HP fraction
 SPAWN_COVER_T = 15.0     # seconds after spawn spent getting into cover before looting
+JINK = True              # erratic sidesteps all the time, not only when hit
+ZONE_EDGE = True         # live in a band just inside the next circle's edge, not deep inside
 WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it off
 
 
@@ -299,7 +301,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v4"
+    name = "survivor-v5"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -337,6 +339,9 @@ class Bot:
         self.state = ""
         self.slow_ticks = 0
         self.hide_xy = None
+        self.jink = 0.0
+        self.jink_t = -1.0
+        self.jink_dir = (1.0, 0.0)
         self.hide_until = -99.0
         self.hide_t = -99.0
         gc.collect()
@@ -360,6 +365,20 @@ class Bot:
         """Where we want to stand: inside the next circle, on our side of it."""
         nc = z["next_center"]
         R = z["next_radius"]
+        if ZONE_EDGE:
+            margin = R * 0.45 if R < 40 else min(35.0, max(16.0, 0.15 * R))
+            outer = max(0.0, R - margin)
+            inner = max(0.0, outer - 22.0)
+            d = math.hypot(x - nc[0], y - nc[1])
+            if inner <= d <= outer:
+                return (x, y), True
+            if d < 1e-6:
+                a = self.rng.uniform(-math.pi, math.pi)
+                ux, uy = math.cos(a), math.sin(a)
+            else:
+                ux, uy = (x - nc[0]) / d, (y - nc[1]) / d
+            r = outer if d > outer else 0.5 * (inner + outer)
+            return (nc[0] + ux * r, nc[1] + uy * r), False
         rr = max(0.0, min(R * 0.55, R - 10.0))
         d = math.hypot(x - nc[0], y - nc[1])
         if d <= rr:
@@ -604,7 +623,7 @@ class Bot:
         time_to_shrink = zone["shrink_start"] - t
         travel = dist_spot / max(1.0, stats.get("walk_speed", 11.7))
         zone_urgent = (not in_zone) or (not at_spot and (time_to_shrink < travel + 12 or zone["dps"] >= 60)) \
-            or (not self.in_circle(x, y, zcx, zcy, zr, 15.0))
+            or (not self.in_circle(x, y, zcx, zcy, zr, 10.0 if ZONE_EDGE else 15.0))
 
         # ---------- perception
         enemies, npcs = [], []
@@ -847,6 +866,40 @@ class Bot:
                 if me.get("grounded") and t - cs > 0.45:
                     jump = True
                 break
+
+        # erratic sidesteps even when nobody seems to be shooting at us
+        if JINK and state.split("/")[0] in ("spot", "zone", "loot", "cube", "hold", "farm", "spawncover", "hide") \
+                and not jump:
+            if t > self.jink_t:
+                self.jink = self.rng.choice((-1.0, 1.0)) * self.rng.uniform(0.35, 0.8)
+                ja = self.rng.uniform(-math.pi, math.pi)
+                self.jink_dir = (math.cos(ja), math.sin(ja))
+                self.jink_t = t + self.rng.uniform(0.35, 1.1)
+            mlen = math.hypot(mvx, mvy)
+            gd = math.hypot(goal[0] - x, goal[1] - y) if goal is not None else 0.0
+            calm_zone = in_zone and zone.get("dps", 0) < 100
+            if mlen > 0.3 and gd > 8.0 and calm_zone:
+                ux, uy = mvx / mlen, mvy / mlen
+                jx, jy = mvx - uy * self.jink, mvy + ux * self.jink
+                jl = math.hypot(jx, jy)
+                # only sidestep where the ground is open; never into a wall
+                if jl > 0.1 and nav.walk_clear(x, y, x + jx / jl * 6.0, y + jy / jl * 6.0, 6.5):
+                    mvx, mvy = jx, jy
+            elif state.split("/")[0] in ("hold", "spot") and mlen <= 0.45 and calm_zone:
+                # shuffle around the spot below step-sound speed (silent)
+                ax, ay = (goal if goal is not None else (x, y))
+                if math.hypot(ax - x, ay - y) > 3.5:
+                    dx_, dy_ = ax - x, ay - y
+                    dd = math.hypot(dx_, dy_)
+                    mvx, mvy = dx_ / dd * 0.4, dy_ / dd * 0.4
+                else:
+                    quiet = 0.9 * self.cfg.get("sound", {}).get("step_speed", 5.0) / max(1.0, stats.get("walk_speed", 11.7))
+                    quiet = min(0.4, quiet if quiet > 0 else 0.38)
+                    jx, jy = self.jink_dir[0] * quiet, self.jink_dir[1] * quiet
+                    if nav.walk_clear(x, y, x + self.jink_dir[0] * 4.0, y + self.jink_dir[1] * 4.0, 4.5):
+                        mvx, mvy = jx, jy
+                    else:
+                        self.jink_t = t  # pick another direction next decision
 
         # walls / roofs in the way of a travel move: jump-jet over them
         climbing = False
