@@ -61,7 +61,10 @@ WANT_WEAPON = {"laser": 3, "lightning": 2}  # never take mortar: lasers cook it 
 # lightning counters the built-ins' lasers (short) and auto-aims: prefer it, fight close, rush chargers
 LIGHTNING_BRAWL = True
 # a quarter of crates / loot sit on roofs, uncontested: jet up to roofs this low (m above the street)
-ROOFS = True
+ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
+DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
+EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
+ENDGAME_ALIVE = 3        # with this few mechs left: no farming / vulture, start fights only under 45 m
 ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
     WANT_WEAPON = {"lightning": 3, "laser": 2}
@@ -336,7 +339,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v13"
+    name = "survivor-v14"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -382,6 +385,7 @@ class Bot:
         self.vulture_until = -99.0
         self.goal_roof = False
         self.path_roof = False
+        self.endgame = False
         self.prog = []
         self.detour = None
         self.detour_until = -99.0
@@ -777,12 +781,18 @@ class Bot:
         if laser:
             max_range = max(max_range, laser[1]["stats"].get("range", 280))
         best_s = 1e9
+        self.endgame = (obs.get("alive") or 16) <= ENDGAME_ALIVE
+        drop_holders = {dr.get("holder") for dr in obs.get("drops", []) if dr.get("holder") is not None} - {self.me}
         for h in hostile:
             d = h["d"]
             if not h["vis"] or d > max_range:
                 continue
-            engage = h["attacked"] or d < AGGRO_RANGE or (h["aiming"] and d < 170) or (h["hpf"] < 0.35 and d < 170) \
+            engage = h["attacked"] or d < (45.0 if self.endgame else AGGRO_RANGE) or (h["aiming"] and d < 170) \
+                or (h["hpf"] < 0.35 and d < 170) \
                 or (self.last_target == h["m"]["id"] and t - self.last_target_t < 3)
+            capturing = DROP_AMBUSH and h["m"]["id"] in drop_holders and d < 170 and hpf > 0.4
+            if capturing:
+                engage = True
             if VULTURE and t < self.vulture_until and h["hpf"] < 0.65 and d < 170 and hpf > 0.45:
                 engage = True
             if PACIFIST:
@@ -793,6 +803,8 @@ class Bot:
             s = d * (0.5 + h["hpf"]) - (150 if h["attacked"] else 0) - (60 if h["aiming"] else 0)
             if COOKOFF_FOCUS and laser and "mortar" in (h["m"].get("weapons") or []):
                 s -= 50
+            if capturing:
+                s -= 120
             if self.last_target == h["m"]["id"]:
                 s -= 40
             if s < best_s:
@@ -1325,7 +1337,8 @@ class Bot:
                 continue
             if d > DROP_RANGE or not self.in_circle(p[0], p[1], zcx, zcy, zr, 10):
                 continue
-            if dr.get("lands_in", 0) > d / 11.0 + 6:
+            lands_in = dr.get("lands_in", 0) or 0.0
+            if lands_in > d / 11.0 + (20 if DROP_AMBUSH else 6):
                 continue
             danger = False
             nnear = 0
@@ -1338,6 +1351,12 @@ class Bot:
             if nnear >= 2:
                 danger = True
             if not danger:
+                if DROP_AMBUSH and (lands_in > 0.5 or (holder is not None and holder != self.me)):
+                    # wait just outside the ring; a lone capturer stands still for capture_s
+                    if d < 24.0:
+                        return (x, y, "drop-wait")
+                    ux, uy = (x - p[0]) / max(d, 0.1), (y - p[1]) / max(d, 0.1)
+                    return (p[0] + ux * 18.0, p[1] + uy * 18.0, "drop-wait")
                 return (p[0], p[1], "drop")
         # weapon
         have_empty = any(w is None for w in weapons)
@@ -1357,7 +1376,7 @@ class Bot:
                     continue
                 d = math.hypot(p[0] - x, p[1] - y)
                 s = d - 15 * WANT_WEAPON[pk["kind"]]
-                if d < 110 and (best is None or s < best[0]):
+                if d < (170 if EARLY_WEAPON and t < 45 else 110) and (best is None or s < best[0]):
                     best = (s, p)
             if best:
                 return self.item_goal(best[1], "loot")
@@ -1387,6 +1406,8 @@ class Bot:
             if d > want:
                 return self.item_goal(p, "farm")
             return (x, y, "farm")
+        if self.endgame:
+            return None
         if VULTURE and hpf > VULTURE_HP:
             g = self.vulture_goal(x, y, zcx, zcy, zr)
             if g is not None:
