@@ -1,0 +1,4 @@
+nav.bin.txt
+__pycache__/
+*.pyc
+comp.txt
