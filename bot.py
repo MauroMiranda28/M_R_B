@@ -95,9 +95,10 @@ ROOF_DIST_W = 0.5        # roof choice: exposure*300 + distance*this
 ROOF_MIN_R = 30.0        # no roof camping once the next circle is smaller than this
 ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when attacked)
 # diagnostic probes for the track (None = normal bot):
-#   "idle":   never fights, never loots, follows the zone, otherwise stands still
+#   "ghost"/"idle": never fights or loots; stays put while inside the next circle; moves only when
+#             the zone forces it, silently (<5 m/s) unless urgent; faces whoever hits it
 #   "runner": never fights, follows the zone, keeps moving away from every mech it sees or fight it hears
-PROBE = None
+PROBE = "ghost"          # v26: play like the passive mechs that placed 2nd/3rd/8th in the observed lobby
 # ---- v24: battle-royale rules (edge ground, silence third-party, fight filter, hysteresis)
 EDGE_BAND = True         # live in the 60-85% band of the next circle, on the side the circle moves toward
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
@@ -384,7 +385,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v25"
+    name = "survivor-v26"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -440,6 +441,8 @@ class Bot:
         self.path_roof = False
         self.endgame = False
         self.focus_hide_until = -99.0
+        self.ghost_hist = []
+        self.ghost_push_until = -99.0
         self.danger = {}
         self.next_hop = 3.0
         self.corridor = False
@@ -910,6 +913,41 @@ class Bot:
         in_zone = me.get("in_zone", True)
         goal = None if at_spot else spot
         threat = False
+        slow = False
+        if PROBE in ("idle", "ghost"):
+            # ghost: like the human who placed 2nd vs 14 house bots without firing a shot. Stay where we are
+            # while it stays inside the next circle; move only when the zone forces it, silently (<5 m/s)
+            # unless it is urgent; never shoot; keep our front to whoever hits us.
+            nc, nr = zone["next_center"], zone["next_radius"]
+            margin = max(12.0, 0.12 * nr) if nr >= 30 else nr * 0.4
+            dn = math.hypot(x - nc[0], y - nc[1])
+            safe_now = self.in_circle(x, y, zcx, zcy, zr, 15.0)
+            goal = None
+            if dn > nr - margin or not safe_now:
+                r = max(0.0, nr - margin - 5.0)
+                if dn > 1e-6:
+                    tx, ty = nc[0] + (x - nc[0]) / dn * min(dn, r), nc[1] + (y - nc[1]) / dn * min(dn, r)
+                else:
+                    tx, ty = nc[0], nc[1]
+                dist_t = math.hypot(tx - x, ty - y)
+                time_left = zone["shrink_start"] - t
+                urgent = (not in_zone) or (not safe_now) or zone["dps"] >= 100 or time_left < dist_t / 4.8 + 8
+                lazy_ok = time_left > dist_t / 4.8 + 25 and t < zone["shrink_start"]
+                if urgent or not lazy_ok:
+                    goal = (tx, ty)
+                    slow = not urgent
+                    threat = urgent and not in_zone
+            # a drone chipping at us: walk away from it
+            for ev in obs.get("events", []):
+                if ev.get("type") == "damaged" and isinstance(ev.get("by"), (int, float)) and ev["by"] >= 100:
+                    for m in obs.get("mechs", []):
+                        if m.get("id") == ev["by"]:
+                            p = m["pos"]
+                            dd = math.hypot(x - p[0], y - p[1]) or 1.0
+                            goal = (x + (x - p[0]) / dd * 30.0, y + (y - p[1]) / dd * 30.0)
+                            slow = False
+                if ev.get("type") == "damaged" and ev.get("bearing") is not None and ev.get("weapon") != "zone":
+                    self.threat_bearing, self.threat_t = ev["bearing"], t
         if PROBE == "runner":
             ax = ay = 0.0
             for m in obs.get("mechs", []):
@@ -949,9 +987,49 @@ class Bot:
             boost = True
         elif cl == "wait":
             mvx = mvy = 0.0
+        if cl in ("jump", "jet") or not me.get("grounded", True):
+            slow = False  # climbing out of somewhere: full speed and jets
+        # stuck while trying to go somewhere: hop and push at full speed for a moment
+        if goal is not None and math.hypot(mvx, mvy) > 0.2:
+            self.ghost_hist.append((t, x, y))
+            while self.ghost_hist and t - self.ghost_hist[0][0] > 3.0:
+                self.ghost_hist.pop(0)
+            if len(self.ghost_hist) >= 25 and math.hypot(x - self.ghost_hist[0][1], y - self.ghost_hist[0][2]) < 1.5:
+                self.ghost_push_until = t + 1.5
+                self.ghost_hist = []
+                self.path = None
+                if me.get("grounded", True):
+                    act["jump"] = True
+        else:
+            self.ghost_hist = []
+        if t < self.ghost_push_until:
+            slow = False
+            boost = True
         ayaw = me["aim"][0]
+        aim_y = wrap(ayaw + (0.8 if PROBE == "runner" else 0.0))
+        if PROBE in ("idle", "ghost"):
+            if slow:
+                ml = math.hypot(mvx, mvy)
+                q = 0.9 * self.cfg.get("sound", {}).get("step_speed", 5.0) / max(1.0, me.get("stats", {}).get("walk_speed", 11.7))
+                if ml > q:
+                    mvx, mvy = mvx / ml * q, mvy / ml * q
+                boost = False
+            # front armour toward danger: whoever hit us lately, else the nearest mech we can see
+            near = None
+            for m in obs.get("mechs", []):
+                if m.get("kind") == "mech":
+                    p = m["pos"]
+                    dd = math.hypot(p[0] - x, p[1] - y)
+                    if near is None or dd < near[0]:
+                        near = (dd, math.atan2(p[1] - y, p[0] - x))
+            if t - self.threat_t < 4.0 and self.threat_bearing is not None:
+                aim_y = self.threat_bearing
+            elif near is not None:
+                aim_y = near[1]
+            else:
+                aim_y = ayaw
         act.update(move=[round(mvx, 3), round(mvy, 3)], boost=bool(boost),
-                   aim=[round(wrap(ayaw + (0.8 if PROBE == "runner" else 0.0)), 4), 0.0])
+                   aim=[round(wrap(aim_y), 4), 0.0])
         mf.draw.label("probe %s t%.0f hp%.0f" % (PROBE, t, me["hp"]))
         return act
 
