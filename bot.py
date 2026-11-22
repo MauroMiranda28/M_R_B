@@ -117,7 +117,7 @@ EDGE_BAND = True         # live in the 60-85% band of the next circle, on the si
 BAND_INNER = 0.75        # inner edge of the band (fraction of next radius); below it we move outward
 BAND_OUTER_K = 0.08      # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
 BAND_OUTER_MIN = 10.0
-ZONE_LEAD = -15.0        # start moving to the next circle this many seconds before it would be late
+ZONE_LEAD = 4.0          # start moving to the next circle this many seconds before it would be late
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
@@ -402,7 +402,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v53"
+    name = "survivor-v47"
 
     def __init__(self, hello):
         cfg = hello["config"]
