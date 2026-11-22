@@ -110,9 +110,9 @@ ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when at
 PROBE = None
 # ---- v24: battle-royale rules (edge ground, silence third-party, fight filter, hysteresis)
 EDGE_BAND = True         # live in the 60-85% band of the next circle, on the side the circle moves toward
-BAND_INNER = 0.75        # inner edge of the band (fraction of next radius); below it we move outward
-BAND_OUTER_K = 0.08      # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
-BAND_OUTER_MIN = 10.0
+BAND_INNER = 0.85        # inner edge of the band (fraction of next radius); below it we move outward
+BAND_OUTER_K = 0.05      # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
+BAND_OUTER_MIN = 7.0
 ZONE_LEAD = 4.0          # start moving to the next circle this many seconds before it would be late
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
@@ -398,7 +398,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v43"
+    name = "survivor-v44"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -510,7 +510,7 @@ class Bot:
         if R < 40:
             return None
         outer = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
-        inner = BAND_INNER * R
+        inner = min(BAND_INNER * R, outer - 8.0)  # keep the band at least 8 m wide in small circles
         dx, dy = x - nc[0], y - nc[1]
         d = math.hypot(dx, dy)
         sx, sy = nc[0] - c[0], nc[1] - c[1]
