@@ -76,6 +76,13 @@ ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
 EARLY_RANGE = 230.0      # how far we walk for a laser / lightning in the first 45 s
 EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
+COVER_SEEK = True        # v35: in a fight, drift to the least exposed spot nearby that still sees the target
+                         #      (cover.bin from tools/build_cover.py; calibrated sim +0.17, within noise)
+COVER_W_E = 1.0          # weight of exposure (0-1) vs distance/40 m in the spot score
+COVER_W_M = 0.6          # share of the fight move given to reaching that spot
+COVER_RINGS = (6.0, 12.0)
+COVER_RETREAT = False    # also while retreating (no line-of-sight requirement then)
+COVER_HOLD_STRAFE = 0.5  # strafe weight kept once at the spot
 OPEN_SCAN = 0.0          # v34 option (off): spin the torso this many seconds at spawn to see who is around
 OPEN_T = 20.0            # v34: until this match time, prefer weapons away from the mechs we know of
 OPEN_W = 1.0             # ... penalty per metre a pickup is closer than 150 m to a known mech (sim +0.3)
@@ -387,7 +394,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v34"
+    name = "survivor-v35"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -395,6 +402,16 @@ class Bot:
         self.me = int(hello["slot"])
         self.rng = random.Random(int(hello.get("seed", 0)))
         self.nav = Nav(os.path.join(HERE, "nav.bin"))
+        self.cover_map = None
+        try:
+            raw_ = zlib.decompress(open(os.path.join(HERE, "cover.bin"), "rb").read())
+            nl_ = raw_.index(bytes([10]))
+            self.cover_hdr = json.loads(raw_[:nl_])
+            self.cover_map = raw_[nl_ + 1:]
+        except Exception:
+            self.cover_map = None
+        self.cover_goal = None
+        self.cover_t = -99.0
         self.roof_spots = []
         try:
             self.roof_spots = json.load(open(os.path.join(HERE, "roofspots.json")))["spots"]
@@ -1233,6 +1250,17 @@ class Bot:
             strafe_w = 0.55 if retreat else STRAFE_W
             mvx = ux * radial + sx * strafe_w
             mvy = uy * radial + sy * strafe_w
+            if COVER_SEEK and self.cover_map is not None and not zone_urgent and (not retreat or COVER_RETREAT):
+                cs = self.cover_spot(x, y, z, p, not retreat, (zcx, zcy, zr), t)
+                if cs is not None:
+                    cdx, cdy = cs[0] - x, cs[1] - y
+                    cd = math.hypot(cdx, cdy)
+                    if cd > 2.0:
+                        mvx = mvx * (1 - COVER_W_M) + cdx / cd * COVER_W_M * 1.4
+                        mvy = mvy * (1 - COVER_W_M) + cdy / cd * COVER_W_M * 1.4
+                    else:
+                        mvx = sx * COVER_HOLD_STRAFE
+                        mvy = sy * COVER_HOLD_STRAFE
             if hide_xy is not None:
                 state = "hide"
                 hx, hy = self.nav_move(x, y, hide_xy[0], hide_xy[1], budget_end)
@@ -1747,6 +1775,42 @@ class Bot:
         if rise < 2.5:
             return True
         return ROOFS and rise <= ROOF_MAX and abs(p[2] - self.nav.stand_at(p[0], p[1])) < 2.5
+
+    def exposure(self, x, y):
+        h = self.cover_hdr
+        i = int((x - h["minX"]) / h["cell"])
+        j = int((y - h["minY"]) / h["cell"])
+        if i < 0 or j < 0 or i >= h["nx"] or j >= h["ny"]:
+            return 1.0
+        return self.cover_map[j * h["nx"] + i] / 255.0
+
+    def cover_spot(self, x, y, z, tp, need_los, zc, t):
+        """Least exposed reachable spot within ~12 m; keeps line of sight to tp when need_los. Cached 0.5 s."""
+        if t - self.cover_t < 0.5 and self.cover_goal is not None:
+            return self.cover_goal
+        self.cover_t = t
+        nav = self.nav
+        zcx, zcy, zr = zc
+        eye_t = (tp[0], tp[1], tp[2] + 4.5)
+        best, bs = None, None
+        cands = [(x, y, 0.0)]
+        for r in COVER_RINGS:
+            for k in range(12):
+                a = k * TAU / 12 + r * 0.21
+                cands.append((x + r * math.cos(a), y + r * math.sin(a), r))
+        for px, py, r in cands:
+            if r > 0 and (nav.blk[nav.idx(px, py)] != 0 or not nav.walk_clear(x, y, px, py) or
+                          not self.in_circle(px, py, zcx, zcy, zr, 12.0)):
+                continue
+            sc = COVER_W_E * self.exposure(px, py) + r / 40.0
+            if need_los:
+                g = nav.ground(px, py)
+                if not nav.los((px, py, g + 7.0), eye_t, 2.0):
+                    sc += 0.6
+            if bs is None or sc < bs:
+                bs, best = sc, (px, py)
+        self.cover_goal = best
+        return best
 
     def item_goal(self, p, state):
         """Goal tuple for an item; flags roof goals so the planner keeps them on the roof."""
