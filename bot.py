@@ -76,7 +76,7 @@ ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
 EARLY_RANGE = 230.0      # how far we walk for a laser / lightning in the first 45 s
 EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
-COVER_SEEK = True        # v35: in a fight, drift to the least exposed spot nearby that still sees the target
+COVER_SEEK = False        # v35: in a fight, drift to the least exposed spot nearby that still sees the target
                          #      (cover.bin from tools/build_cover.py; calibrated sim +0.17, within noise)
 COVER_W_E = 1.0          # weight of exposure (0-1) vs distance/40 m in the spot score
 COVER_W_M = 0.6          # share of the fight move given to reaching that spot
@@ -398,7 +398,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v41"
+    name = "survivor-v42"
 
     def __init__(self, hello):
         cfg = hello["config"]
