@@ -24,7 +24,11 @@ UPGRADE_PRIORITY = [
     "mortar_reload", "mortar_velocity", "mortar_splash",
 ]
 # see first, aim faster: +25 m vision, +15 m proximity, half the sound bearing error, +30% turn rate
-VISION_FIRST = True
+VISION_FIRST = False      # v46: off (sensors, armor, gyros, plating first until v45)
+PLATING_FIRST = True     # v46: +15% max HP per pick beats -8% damage; top-3 bots and the house bots pick plating first
+if PLATING_FIRST:
+    UPGRADE_PRIORITY = ["plating", "armor", "nanites", "sensors"] + \
+        [u for u in UPGRADE_PRIORITY if u not in ("plating", "armor", "nanites", "sensors")]
 if VISION_FIRST:
     UPGRADE_PRIORITY = ["sensors", "armor", "gyros", "plating"] + \
         [u for u in UPGRADE_PRIORITY if u not in ("sensors", "armor", "gyros", "plating")]
@@ -399,7 +403,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v45"
+    name = "survivor-v46"
 
     def __init__(self, hello):
         cfg = hello["config"]
