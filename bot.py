@@ -27,9 +27,8 @@ UPGRADE_PRIORITY = [
 VISION_FIRST = False      # v47: off (sensors, armor, gyros, plating first until v45)
 PLATING_FIRST = True     # v47: +15% max HP per pick beats -8% damage; top-3 bots and the house bots pick plating first
 if PLATING_FIRST:
-    # v49: the top-3 showdown order (plating > armor > gun_damage > nanites > gun_rate > laser_damage)
-    _TOP = ["plating", "armor", "gun_damage", "nanites", "gun_rate", "laser_damage", "laser_charge", "sensors"]
-    UPGRADE_PRIORITY = _TOP + [u for u in UPGRADE_PRIORITY if u not in _TOP]
+    UPGRADE_PRIORITY = ["plating", "armor", "nanites", "sensors"] + \
+        [u for u in UPGRADE_PRIORITY if u not in ("plating", "armor", "nanites", "sensors")]
 if VISION_FIRST:
     UPGRADE_PRIORITY = ["sensors", "armor", "gyros", "plating"] + \
         [u for u in UPGRADE_PRIORITY if u not in ("sensors", "armor", "gyros", "plating")]
@@ -59,7 +58,7 @@ SOUND_DIST = {"near": 40.0, "mid": 110.0, "far": 230.0}
 # v11 small-tweaks package
 GUN_MAX_RANGE = 150.0    # don't give our position away with low-odds long gun shots (unless they attack us)
 COOKOFF_FOCUS = True     # with a laser, prefer targets carrying a mortar (+60% cook-off)
-WEAPON_UPGRADES = False  # weapon upgrades for what we actually hold, right after the defensive ones
+WEAPON_UPGRADES = True   # weapon upgrades for what we actually hold, right after the defensive ones
 # duel micro: how we dodge while trading shots (bullets take 0.3-0.5 s to cross 75-125 m)
 # v21 resets these to the v14 values (v20's duel tuning scored 3.52 on the track)
 STRAFE_MIN, STRAFE_MAX = 0.3, 0.7   # seconds between direction changes
@@ -115,11 +114,10 @@ ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when at
 PROBE = None
 # ---- v24: battle-royale rules (edge ground, silence third-party, fight filter, hysteresis)
 EDGE_BAND = True         # live in the 60-85% band of the next circle, on the side the circle moves toward
-BAND_INNER = 0.75        # inner edge of the band (fraction of next radius); below it we move outward
-BAND_OUTER_K = 0.08      # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
-BAND_OUTER_MIN = 10.0
+BAND_INNER = 0.68        # inner edge of the band (fraction of next radius); below it we move outward
+BAND_OUTER_K = 0.11      # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
+BAND_OUTER_MIN = 12.0
 ZONE_LEAD = 4.0          # start moving to the next circle this many seconds before it would be late
-BAND_MIN_R = 15.0        # below this next-circle radius stop using the band (until v47: 40 -> center-ish 55% rule)
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
@@ -404,7 +402,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v50"
+    name = "survivor-v51"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -513,10 +511,10 @@ class Bot:
         (we are on the 'corridor' side everybody crosses), rotate early toward the side it moves to."""
         nc, R, c = z["next_center"], z["next_radius"], z["center"]
         self.corridor = False
-        if R < BAND_MIN_R:
+        if R < 40:
             return None
         outer = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
-        inner = min(BAND_INNER * R, outer - 8.0)  # keep the band at least 8 m wide in small circles
+        inner = BAND_INNER * R
         dx, dy = x - nc[0], y - nc[1]
         d = math.hypot(dx, dy)
         sx, sy = nc[0] - c[0], nc[1] - c[1]
