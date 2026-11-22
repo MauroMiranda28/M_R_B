@@ -114,6 +114,7 @@ BAND_INNER = 0.85        # inner edge of the band (fraction of next radius); bel
 BAND_OUTER_K = 0.05      # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
 BAND_OUTER_MIN = 7.0
 ZONE_LEAD = 4.0          # start moving to the next circle this many seconds before it would be late
+BAND_MIN_R = 15.0        # below this next-circle radius stop using the band (v44 and before: 40 -> center-ish 55% rule)
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
@@ -398,7 +399,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v44"
+    name = "survivor-v45"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -507,7 +508,7 @@ class Bot:
         (we are on the 'corridor' side everybody crosses), rotate early toward the side it moves to."""
         nc, R, c = z["next_center"], z["next_radius"], z["center"]
         self.corridor = False
-        if R < 40:
+        if R < BAND_MIN_R:
             return None
         outer = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
         inner = min(BAND_INNER * R, outer - 8.0)  # keep the band at least 8 m wide in small circles
