@@ -110,6 +110,10 @@ ROOF_ENGAGE = 60.0       # on the roof, only start fights this close (or when at
 PROBE = None
 # ---- v24: battle-royale rules (edge ground, silence third-party, fight filter, hysteresis)
 EDGE_BAND = True         # live in the 60-85% band of the next circle, on the side the circle moves toward
+BAND_INNER = 0.0         # inner edge of the band (fraction of next radius); below it we move outward
+BAND_OUTER_K = 0.15       # outer edge of the band = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
+BAND_OUTER_MIN = 15.0
+ZONE_LEAD = 12.0         # start moving to the next circle this many seconds before it would be late
 SILENCE_STRIKE = True    # third-party: wait ~70 m out while the fight is loud, go in when it goes quiet
 FIGHT_FILTER = True      # don't start fights that gain nothing (time / HP / position); always answer attacks
 RETREAT_HYST = True      # once retreating, keep at it until HP > 60% or no threat within 80 m
@@ -394,7 +398,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v35"
+    name = "survivor-v36"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -505,8 +509,8 @@ class Bot:
         self.corridor = False
         if R < 40:
             return None
-        outer = R - max(15.0, 0.15 * R)
-        inner = 0.6 * R
+        outer = R - max(BAND_OUTER_MIN, BAND_OUTER_K * R)
+        inner = BAND_INNER * R
         dx, dy = x - nc[0], y - nc[1]
         d = math.hypot(dx, dy)
         sx, sy = nc[0] - c[0], nc[1] - c[1]
@@ -1050,7 +1054,7 @@ class Bot:
         dist_spot = math.hypot(spot[0] - x, spot[1] - y)
         time_to_shrink = zone["shrink_start"] - t
         travel = dist_spot / max(1.0, stats.get("walk_speed", 11.7))
-        zone_urgent = (not in_zone) or (not at_spot and (time_to_shrink < travel + 12 or zone["dps"] >= 60)) \
+        zone_urgent = (not in_zone) or (not at_spot and (time_to_shrink < travel + ZONE_LEAD or zone["dps"] >= 60)) \
             or (EDGE_BAND and self.corridor and not at_spot and self.camp is None) \
             or (not self.in_circle(x, y, zcx, zcy, zr, 10.0 if ZONE_EDGE else 15.0))
 
