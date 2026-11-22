@@ -76,6 +76,9 @@ ROOFS = False            # v13 (roofs on) 3.77 < v12 3.98: off
 DROP_AMBUSH = True       # be at a supply drop before it lands, wait ~18 m out, kill a lone capturer, then take it
 EARLY_RANGE = 230.0      # how far we walk for a laser / lightning in the first 45 s
 EARLY_WEAPON = True      # first 45 s: walk up to 170 m for a lightning / laser
+OPEN_SCAN = 0.0          # v34 option (off): spin the torso this many seconds at spawn to see who is around
+OPEN_T = 20.0            # v34: until this match time, prefer weapons away from the mechs we know of
+OPEN_W = 1.0             # ... penalty per metre a pickup is closer than 150 m to a known mech (sim +0.3)
 ENDGAME_ALIVE = 3        # with this few mechs left: no farming / vulture, start fights only under 45 m
 ROOF_MAX = 36.0
 if LIGHTNING_BRAWL:
@@ -384,7 +387,7 @@ class Planner:
 
 # ---------------------------------------------------------------------------------------- bot
 class Bot:
-    name = "survivor-v33"
+    name = "survivor-v34"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -1643,6 +1646,8 @@ class Bot:
                             self.sound_look_t = t
                     if self.sound_look is not None and t - self.sound_look_t < 1.5:
                         aim = [self.sound_look, 0.0]
+                if aim is None and t < OPEN_SCAN:
+                    aim = [wrap(ayaw + 1.5), 0.0]
                 if aim is None:
                     base_yaw = math.atan2(mvy, mvx) if mm > 0.3 else ayaw
                     if mm > 0.3:
@@ -1817,6 +1822,15 @@ class Bot:
                     continue
                 d = math.hypot(p[0] - x, p[1] - y)
                 s = d - 15 * WANT_WEAPON[pk["kind"]]
+                if t < OPEN_T and OPEN_W > 0:
+                    # opening: the first fights are 2-3 mechs converging; take the weapon on the empty side
+                    for om in obs.get("mechs", []):
+                        if om.get("kind") != "mech":
+                            continue
+                        q = om["pos"]
+                        if math.hypot(q[0] - x, q[1] - y) > 250:
+                            continue
+                        s += OPEN_W * max(0.0, 150.0 - math.hypot(p[0] - q[0], p[1] - q[1]))
                 reach_ = EARLY_RANGE if EARLY_WEAPON and t < 45 else 110
                 if LASER_HUNT and pk["kind"] == "laser" and "laser" not in slots:
                     reach_ = max(reach_, LASER_HUNT_RANGE)
